@@ -10,7 +10,7 @@ import re
 import os
 from contextlib import asynccontextmanager
 from fastapi import HTTPException
-from typing import Optional, Dict, List, Tuple
+from typing import Any, Optional, Dict, List, Tuple
 from src.model_context import get_context_length, DEFAULT_CONTEXT, is_local_endpoint
 from urllib.parse import urlparse
 
@@ -1840,16 +1840,22 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
             response = _parse_ollama_response(data)
         else:
             msg = data["choices"][0]["message"]
+            from src.model_profiles import get_model_profile
+            profile = get_model_profile(model, endpoint_url=url)
             content = msg.get("content")
             if isinstance(content, list):
                 # Mistral structured content — extract thinking + text
                 text_part, thinking_part = _normalize_mistral_content(content)
-                if thinking_part:
+                if thinking_part and profile.name == "default":
                     response = thinking_part + "\n\n" + (text_part or "")
                 else:
-                    response = text_part or msg.get("reasoning_content") or ""
+                    response = (
+                        profile.normal_content({**msg, "content": text_part})
+                        if profile.name != "default"
+                        else text_part or msg.get("reasoning_content") or ""
+                    )
             else:
-                response = content or msg.get("reasoning_content") or ""
+                response = profile.normal_content(msg)
         _set_cached_response(cache_key, response)
         return response
     except Exception:
@@ -2072,7 +2078,9 @@ async def llm_call_async(
                     response = _parse_ollama_response(data)
                 else:
                     msg = data["choices"][0]["message"]
-                    response = msg.get("content") or msg.get("reasoning_content") or ""
+                    from src.model_profiles import get_model_profile
+                    profile = get_model_profile(model, endpoint_url=url)
+                    response = profile.normal_content(msg)
                 _set_cached_response(cache_key, response)
                 return response
             except Exception:
@@ -2107,7 +2115,8 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                      max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None,
                      timeout: int = LLMConfig.STREAM_TIMEOUT, prompt_type: Optional[str] = None,
                      tools: Optional[List[Dict]] = None, session_id: Optional[str] = None,
-                     tool_choice_none: bool = False, workload: str = "foreground"):
+                     tool_choice_none: bool = False, tool_choice: Optional[Any] = None,
+                     workload: str = "foreground"):
     target_url = _stream_target_url(url)
     async with _local_model_slot(target_url, model, workload):
         async for chunk in _stream_llm_inner(
@@ -2122,6 +2131,7 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
             tools=tools,
             session_id=session_id,
             tool_choice_none=tool_choice_none,
+            tool_choice=tool_choice,
         ):
             yield chunk
 
@@ -2130,7 +2140,8 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                             max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None,
                             timeout: int = LLMConfig.STREAM_TIMEOUT, prompt_type: Optional[str] = None,
                             tools: Optional[List[Dict]] = None, session_id: Optional[str] = None,
-                            tool_choice_none: bool = False):
+                            tool_choice_none: bool = False,
+                            tool_choice: Optional[Any] = None):
     """Stream LLM responses with improved error handling.
 
     Yields SSE chunks:
@@ -2190,6 +2201,8 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
             payload[tok_key] = max_tokens
         if tools:
             payload["tools"] = tools
+            if tool_choice is not None:
+                payload["tool_choice"] = tool_choice
         elif tool_choice_none:
             payload["tool_choice"] = "none"
         # Mistral thinking-capable models — send reasoning_effort so Mistral

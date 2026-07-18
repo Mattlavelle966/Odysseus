@@ -46,6 +46,9 @@ Native installs, GPU notes, Windows/macOS instructions, HTTPS, and configuration
 - **Compare** — blind side-by-side model testing and synthesis.
 - **Documents** — writing-first editor with AI edits, suggestions, Markdown, HTML, CSV, and syntax highlighting.
 - **Email** — IMAP/SMTP inbox with triage, tags, summaries, reminders, and reply drafts.
+- **Email Research Automation** — approved inbound mail becomes a durable,
+  idempotent Deep Research job with threaded acknowledgement and report
+  delivery. See the [operator guide](docs/email-research-automation.md).
 - **Notes, Tasks + Calendar** — reminders, todos, scheduled agent tasks, and CalDAV sync.
 - **Extras** — gallery/image editor, themes, uploads, web search, presets, sessions, and 2FA.
 

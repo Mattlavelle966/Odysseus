@@ -885,6 +885,7 @@ class TaskScheduler:
             # previous llm/research run's model. The executors set it once the
             # model is resolved.
             self._last_run_model = None
+            self._last_run_summary = None
             foreground_cancel = {"hit": False}
             foreground_monitor = None
             if gate_foreground:
@@ -910,23 +911,51 @@ class TaskScheduler:
                 if task_type == "action":
                     result, success = await self._execute_action(task, run_id=run_id)
                     run.status = "success" if success else "error"
+                    run.result_status = "success" if success else "failed"
+                    run.result_summary_json = json.dumps({
+                        "status": run.result_status,
+                        "action": task.action,
+                        "side_effect_confirmed": bool(success),
+                    })
                     run.result = result
                     if not success:
                         run.error = result
                 elif task_type == "research":
                     result = await self._execute_research_task(task, db)
                     run.status = "success"
+                    run.result_status = "success"
+                    run.result_summary_json = json.dumps({
+                        "status": "success",
+                        "research_result_persisted": True,
+                    })
                     run.result = result
                 else:
                     # LLM task — use agent loop for tool access
                     result = await self._execute_llm_task(task, db)
-                    run.status = "success"
+                    summary = self._last_run_summary or {
+                        "status": "success",
+                        "side_effect_required": False,
+                    }
+                    run.result_status = summary.get("status", "success")
+                    run.result_summary_json = json.dumps(summary)
+                    run.status = (
+                        "success" if run.result_status == "success" else "error"
+                    )
+                    if run.status != "success":
+                        run.error = (
+                            "Required side effect was not confirmed by a "
+                            "successful tool result"
+                        )
                     run.result = result
                 # Record which model actually ran (resolved inside the executor).
                 if getattr(self, "_last_run_model", None):
                     run.model = self._last_run_model
                 if run.status == "success":
                     await self._deliver_task_result(task, result, db, model=getattr(self, "_last_run_model", None))
+                    summary = json.loads(run.result_summary_json or "{}")
+                    summary["delivery_confirmed"] = True
+                    summary["output_target"] = task.output_target or "session"
+                    run.result_summary_json = json.dumps(summary)
             except TaskDeferred as defer:
                 count = self._task_defer_counts.get(task_id, 0) + 1
                 self._task_defer_counts[task_id] = count
@@ -1495,6 +1524,27 @@ class TaskScheduler:
             override_user_message=context,
         )
 
+    @staticmethod
+    def _expected_side_effect_tools(prompt: str) -> set[str]:
+        """Conservatively identify explicit side effects requested of an agent."""
+        text = (prompt or "").lower()
+        expected: set[str] = set()
+        if re.search(r"\b(send|reply|forward|email)\b.{0,80}\b(email|message|mail)\b", text):
+            expected |= {"send_email", "reply_to_email", "bulk_email"}
+        if re.search(
+            r"\b(create|edit|update|replace|append|patch|change)\b.{0,80}\b(document|doc|file)\b",
+            text,
+        ):
+            expected |= {
+                "create_document", "edit_document", "update_document",
+                "write_file", "edit_file",
+            }
+        if re.search(r"\b(start|trigger|launch|run)\b.{0,50}\b(deep )?research\b", text):
+            expected |= {"trigger_research", "manage_research"}
+        if re.search(r"\b(create|update|delete|cancel)\b.{0,60}\b(task|event|reminder|calendar)\b", text):
+            expected |= {"manage_tasks", "manage_calendar", "manage_notes"}
+        return expected
+
     async def _execute_llm_task(self, task, db) -> str:
         """Execute an LLM task with full tool access via the agent loop."""
         from core.database import Session as DbSession, ChatMessage, CrewMember
@@ -1661,6 +1711,15 @@ class TaskScheduler:
         except Exception:
             pass
 
+        if getattr(self, "_last_run_summary", None) is None:
+            expected = self._expected_side_effect_tools(task.prompt or "")
+            self._last_run_summary = {
+                "status": "partial" if expected else "success",
+                "side_effect_required": bool(expected),
+                "expected_tools": sorted(expected),
+                "executed_tools": [],
+                "confirmed_tools": [],
+            }
         return result
 
     async def _deliver_task_result(self, task, result: str, db, model: str = None):
@@ -1883,6 +1942,7 @@ class TaskScheduler:
             pass
         full_text = ""
         tool_results = []
+        tool_evidence = []
 
         # Honor per-task max_steps (defense against runaway agent loops).
         # Falls back to 20 if not set — the historical default.
@@ -1927,6 +1987,10 @@ class TaskScheduler:
                         # Tool results — capture summary so we have SOMETHING even
                         # if the model never produces a final text response
                         tool_summary = data.get("stdout") or data.get("output") or data.get("result") or ""
+                        tool_evidence.append({
+                            "tool": str(data.get("tool") or ""),
+                            "success": bool(data.get("success", False)),
+                        })
                         if isinstance(tool_summary, str) and tool_summary.strip():
                             tool_results.append(f"[{data.get('tool', '?')}] {tool_summary[:500]}")
                 except (json.JSONDecodeError, KeyError):
@@ -1961,6 +2025,23 @@ class TaskScheduler:
                 if tool_results:
                     full_text = "\n".join(tool_results[-5:])
 
+        expected = self._expected_side_effect_tools(user_content)
+        confirmed = sorted({
+            evidence["tool"]
+            for evidence in tool_evidence
+            if evidence["success"] and evidence["tool"] in expected
+        })
+        status = "success" if not expected or confirmed else "partial"
+        self._last_run_summary = {
+            "status": status,
+            "side_effect_required": bool(expected),
+            "expected_tools": sorted(expected),
+            "executed_tools": [
+                evidence["tool"] for evidence in tool_evidence
+                if evidence["success"]
+            ],
+            "confirmed_tools": confirmed,
+        }
         return full_text or "(no output)"
 
     async def _execute_research_task(self, task, db) -> str:

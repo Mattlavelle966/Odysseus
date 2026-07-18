@@ -589,6 +589,9 @@ preset_manager    = components["preset_manager"]
 chat_processor    = components["chat_processor"]
 research_handler  = components["research_handler"]
 app.state.research_handler = research_handler
+from src.email_research import EmailResearchWorker
+email_research_worker = EmailResearchWorker(research_handler)
+app.state.email_research_worker = email_research_worker
 chat_handler      = components["chat_handler"]
 model_discovery   = components["model_discovery"]
 skills_manager    = components["skills_manager"]
@@ -837,6 +840,8 @@ app.include_router(setup_note_routes(task_scheduler, upload_handler=upload_handl
 from routes.email_routes import setup_email_routes
 email_router = setup_email_routes()
 app.include_router(email_router)
+from routes.email_research_routes import setup_email_research_routes
+app.include_router(setup_email_research_routes(email_research_worker))
 
 # Codex integration — HTTP surface for the Codex plugin/MCP bridge. Reuses
 # api_token scopes (todos:read|write, email:read|draft|send) so external
@@ -1190,6 +1195,20 @@ async def _startup_event():
             "In-process task scheduler disabled (ODYSSEUS_INPROCESS_TASKS=0); "
             "drive task firing externally (e.g. cron)."
         )
+    # Deterministic email research automation has its own queue and never uses
+    # the interactive/task-scheduler idle gate. For SQLite it intentionally
+    # runs inside this process so every write uses the same WAL-configured
+    # SQLAlchemy layer.
+    _email_research_inprocess = os.environ.get(
+        "ODYSSEUS_INPROCESS_EMAIL_RESEARCH", "1"
+    ).strip().lower()
+    if _email_research_inprocess not in ("0", "false", "no", "off", ""):
+        await email_research_worker.start()
+    else:
+        logger.info(
+            "In-process email research worker disabled "
+            "(ODYSSEUS_INPROCESS_EMAIL_RESEARCH=0)"
+        )
     # Periodic null-owner sweep — re-runs the legacy-owner assignment hourly
     # so any data created while auth was disabled / localhost-bypassed gets
     # claimed by the admin instead of staying world-visible (M19).
@@ -1257,6 +1276,10 @@ async def _shutdown_event():
     # Stop task scheduler (no-op if it never started under the gate)
     try:
         await task_scheduler.stop()
+    except Exception:
+        pass
+    try:
+        await email_research_worker.stop()
     except Exception:
         pass
     # Close webhook manager

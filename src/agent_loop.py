@@ -2178,6 +2178,7 @@ def _resolve_tool_blocks(
     round_num: int,
     is_api_model: bool = False,
     allow_fenced_for_api: bool = False,
+    structured_only: bool = False,
 ):
     """Choose native function calls or fenced code block parsing. Returns (tool_blocks, used_native)."""
     used_native = False
@@ -2196,7 +2197,7 @@ def _resolve_tool_blocks(
                 logger.warning(f"  -> FAILED to convert native call: {tc_name} args={tc_args[:200]}")
         if tool_blocks:
             used_native = True
-    if not used_native:
+    if not used_native and not structured_only:
         # Native function-calling models (GPT/Claude/Grok/Qwen3/DeepSeek-V, etc.)
         # have a reliable structured channel for real tool invocations. When such
         # a model emits no native tool_calls, any ```bash/```python/```json fence
@@ -2576,6 +2577,10 @@ async def stream_agent_loop(
       - data: [DONE]                                        (end)
     """
 
+    from src.model_profiles import get_model_profile
+    _model_profile = get_model_profile(model, endpoint_url=endpoint_url)
+    _ornith_profile = _model_profile.name == "ornith"
+    _ornith_allowed_names_for_turn = None
     mcp_mgr = get_mcp_manager()
     prep_timings: Dict[str, float] = {}
     disabled_tools = set(disabled_tools or [])
@@ -3070,6 +3075,10 @@ async def stream_agent_loop(
         _is_api_model = False
     else:
         _is_api_model = any(h in endpoint_url for h in _API_HOSTS) or _model_supports_tools
+    # Ornith's only executable channel is validated OpenAI tool_calls. This is
+    # profile-local: every other model keeps the existing endpoint heuristic.
+    if _ornith_profile and _endpoint_supports is not False:
+        _is_api_model = True
     _compact_agent_prompt = _is_api_model or _is_ollama_native or _ollama_openai_compat
     messages, mcp_schemas = _build_system_prompt(
         messages, model, _prompt_active_document, mcp_mgr, disabled_tools,
@@ -3081,6 +3090,40 @@ async def stream_agent_loop(
         suppress_skills=_low_signal_turn,
         active_email=active_email,
     )
+    if _ornith_profile and not guide_only:
+        _ornith_allowed = set(
+            _relevant_tools or {"ask_user", "update_plan"}
+        )
+        _ornith_allowed.update(set(forced_tools or ()))
+        if _active_document_relevant:
+            _ornith_allowed &= {
+                "create_document", "edit_document", "update_document",
+                "ask_user", "update_plan",
+            }
+            _doc_request = _last_user.lower()
+            if re.search(r"\b(create|make|start)\b.{0,30}\b(new )?document\b", _doc_request):
+                _ornith_allowed -= {"edit_document", "update_document"}
+            elif re.search(
+                r"\b(replace|rewrite|overwrite)\b.{0,40}\b(entire|complete|whole|all)\b",
+                _doc_request,
+            ):
+                _ornith_allowed -= {"create_document", "edit_document"}
+            else:
+                _ornith_allowed -= {"create_document", "update_document"}
+        _ornith_allowed_names_for_turn = set(_ornith_allowed)
+        _ornith_instruction = _model_profile.agent_instruction(
+            objective=_last_user,
+            allowed_names=sorted(_ornith_allowed),
+            terminal_state=(
+                "the requested side effect is confirmed by a successful tool "
+                "result; prose alone is not success"
+            ),
+            active_document=_prompt_active_document,
+        )
+        if _ornith_instruction:
+            messages = _insert_before_latest_user(
+                messages, {"role": "system", "content": _ornith_instruction}
+            )
     if _ody_doc_finetune_mode and not plan_mode and not approved_plan and not guide_only:
         messages = _minimal_odysseus_doc_messages(
             messages,
@@ -3263,6 +3306,7 @@ async def stream_agent_loop(
         re.IGNORECASE,
     )
     _awaiting_user = False  # set by ask_user → end the turn and wait for a choice
+    _ornith_correction_used = False
 
     # Document streaming state (persists across rounds)
     _doc_acc = ""          # accumulated tool-call JSON arguments
@@ -3332,6 +3376,18 @@ async def stream_agent_loop(
                     if t.get("function", {}).get("name") not in disabled_tools
                     and t.get("name") not in disabled_tools
                 ]
+            if _ornith_profile:
+                _ornith_allowed_names = set(
+                    _ornith_allowed_names_for_turn
+                    or _relevant_tools
+                    or {"ask_user", "update_plan"}
+                )
+                _ornith_allowed_names.update(set(forced_tools or ()))
+                all_tool_schemas = _model_profile.adapt_tool_schemas(
+                    all_tool_schemas,
+                    allowed_names=_ornith_allowed_names,
+                    active_document=_prompt_active_document,
+                )
         else:
             # Local: only MCP schemas when message suggests MCP tool usage
             _last_content = _last_user.lower()
@@ -3340,6 +3396,14 @@ async def stream_agent_loop(
         agent_stream_timeout = int(get_setting("agent_stream_timeout_seconds", 300) or 300)
 
         _tool_names_sent = [t.get("function", {}).get("name") for t in (all_tool_schemas or []) if t.get("function")]
+        _profile_tool_choice = None
+        if _ornith_profile and len(_tool_names_sent) == 1 and (
+            set(forced_tools or ()) & set(_tool_names_sent)
+        ):
+            _profile_tool_choice = {
+                "type": "function",
+                "function": {"name": _tool_names_sent[0]},
+            }
         logger.info(f"[agent-debug] round={round_num} model={model} _is_api_model={_is_api_model} tools_sent={len(_tool_names_sent)} tool_names={_tool_names_sent[:15]} relevant_tools={sorted(_relevant_tools)[:15] if _relevant_tools else 'ALL'}")
 
         # Primary target + any configured fallback models. stream_llm_with_fallback
@@ -3372,6 +3436,7 @@ async def stream_agent_loop(
             prompt_type=prompt_type if round_num == 1 else None,
             tools=all_tool_schemas if all_tool_schemas else None,
             tool_choice_none=_ody_doc_finetune_mode,
+            tool_choice=_profile_tool_choice,
             timeout=agent_stream_timeout,
             session_id=session_id,
             workload=workload,
@@ -3504,7 +3569,14 @@ async def stream_agent_loop(
                             round_response += _delta_text
                             full_response += _delta_text
                             data["delta"] = _delta_text
-                        if not _ody_qwen_finetune_model or data.get("thinking"):
+                        if (
+                            (not _ody_qwen_finetune_model or data.get("thinking"))
+                            and not (
+                                _ornith_profile
+                                and data.get("thinking")
+                                and not get_setting("ornith_show_reasoning", False)
+                            )
+                        ):
                             yield f"data: {json.dumps(data)}\n\n"
                         # Detect text-fence doc streaming. Normal agent prompts
                         # use ```create_document; the doc LoRA streaming path
@@ -3593,12 +3665,45 @@ async def stream_agent_loop(
             if _ody_doc_finetune_mode
             else round_response
         )
+        if _ornith_profile:
+            _validation = _model_profile.validate_tool_calls(
+                native_tool_calls,
+                all_tool_schemas,
+                response_text=round_response,
+            )
+            native_tool_calls = _validation.calls
+            if _validation.errors or (
+                _validation.pseudo_tool_call and not native_tool_calls
+            ):
+                warning = (
+                    "Ornith endpoint emitted an invalid or textual pseudo-tool "
+                    "call; nothing was executed."
+                )
+                logger.warning(
+                    "[ornith-profile] %s errors=%s",
+                    warning,
+                    _validation.errors,
+                )
+                yield f'data: {json.dumps({"type": "model_capability_warning", "profile": "ornith", "warning": warning})}\n\n'
+                if not _ornith_correction_used and all_tool_schemas:
+                    _ornith_correction_used = True
+                    messages.append({
+                        "role": "system",
+                        "content": _model_profile.correction_message(
+                            all_tool_schemas, _validation.errors
+                        ),
+                    })
+                    yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1, "reason": "ornith_tool_correction"})}\n\n'
+                    continue
+
         tool_blocks, used_native, converted_calls = _resolve_tool_blocks(
             _normalized_doc_round,
             native_tool_calls,
             round_num,
+            # Ornith never falls back to textual/fenced parsing.
             is_api_model=(_is_api_model and not guide_only),
             allow_fenced_for_api=_ody_doc_finetune_mode,
+            structured_only=_ornith_profile,
         )
         if _ody_doc_stream_create_mode and tool_blocks:
             create_idx = next(
@@ -4235,7 +4340,19 @@ async def stream_agent_loop(
                 output_text = _truncate(result["error"])
 
             # Emit tool_output (include ui_event data if present)
-            tool_output_data = {"type": "tool_output", "tool": block.tool_type, "command": cmd_display, "output": output_text, "exit_code": result.get("exit_code")}
+            tool_succeeded = (
+                not result.get("error")
+                and result.get("success", True) is not False
+                and result.get("exit_code") in (None, 0)
+            )
+            tool_output_data = {
+                "type": "tool_output",
+                "tool": block.tool_type,
+                "command": cmd_display,
+                "output": output_text,
+                "exit_code": result.get("exit_code"),
+                "success": tool_succeeded,
+            }
             if is_doc_tool and "action" in result:
                 tool_output_data.update({
                     "doc_id": result.get("doc_id"),

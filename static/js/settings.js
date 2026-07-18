@@ -212,6 +212,69 @@ async function _fetchModelEndpoints() {
   return Array.isArray(endpoints) ? endpoints : [];
 }
 
+async function initModelCapabilityProfile() {
+  const endpointSelect = el('set-profile-endpoint');
+  if (!endpointSelect || endpointSelect.dataset.bound === '1') return;
+  endpointSelect.dataset.bound = '1';
+  const profileSelect = el('set-profile-value');
+  const modelInput = el('set-profile-model');
+  const message = el('set-profile-msg');
+  let endpoints = [];
+  const show = (text, ok = true) => {
+    message.textContent = text;
+    message.style.color = ok ? 'var(--green,#50fa7b)' : 'var(--red,#ff5555)';
+  };
+  const selected = () => endpoints.find(ep => ep.id === endpointSelect.value);
+  const sync = () => {
+    const ep = selected();
+    profileSelect.value = ep?.model_profile || 'auto';
+    if (ep && !modelInput.value) modelInput.value = (ep.models || [])[0] || '';
+  };
+  try {
+    endpoints = await _fetchModelEndpoints();
+    endpoints.filter(ep => ep.is_enabled && ep.model_type !== 'image').forEach(ep => {
+      const option = document.createElement('option');
+      option.value = ep.id;
+      option.textContent = ep.name;
+      endpointSelect.appendChild(option);
+    });
+  } catch (error) {
+    show(`Could not load endpoint profiles: ${error.message}`, false);
+  }
+  endpointSelect.addEventListener('change', sync);
+  el('set-profile-save').addEventListener('click', async () => {
+    if (!selected()) return show('Select an endpoint first', false);
+    try {
+      const response = await fetch(`/api/model-endpoints/${encodeURIComponent(endpointSelect.value)}`, {
+        method: 'PATCH', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model_profile: profileSelect.value }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.detail || 'Profile update failed');
+      selected().model_profile = data.model_profile;
+      show(`Endpoint profile saved as ${data.model_profile}`);
+    } catch (error) { show(error.message, false); }
+  });
+  el('set-profile-diagnostic').addEventListener('click', async () => {
+    if (!selected()) return show('Select an endpoint first', false);
+    if (!modelInput.value.trim()) return show('Choose the Ornith model id to test', false);
+    show('Testing structured tool-call support…');
+    try {
+      const response = await fetch(`/api/model-endpoints/${encodeURIComponent(endpointSelect.value)}/ornith-diagnostic`, {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: modelInput.value.trim() }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.detail || 'Diagnostic failed');
+      show(data.ok
+        ? 'Passed: endpoint emitted a valid OpenAI tool_calls object.'
+        : `${data.warning || 'No valid structured tool call.'} ${data.llama_cpp_hint || ''}`, !!data.ok);
+    } catch (error) { show(error.message, false); }
+  });
+}
+
 function _endpointLabel(ep) {
   return ep.name + (ep.online ? '' : ' (offline)');
 }
@@ -2334,12 +2397,14 @@ function initAll() {
   initResearchSettings();
   initResearchSearchSettings();
   initAgentSettings();
+  initModelCapabilityProfile();
   initAppearance();
   initShortcuts();
   initAccount();
   initIntegrations();
   initEmailSettings();
   initEmailAccountsSettings();
+  initEmailResearchAutomation();
   initReminderSettings();
   initUnifiedIntegrations();
 }
@@ -3100,6 +3165,178 @@ async function initEmailAccountsSettings() {
 
   addBtn.addEventListener('click', () => showForm(null));
   await renderList();
+}
+
+async function initEmailResearchAutomation() {
+  if (!el('email-research-settings-card') || el('email-research-settings-card').dataset.bound === '1') return;
+  el('email-research-settings-card').dataset.bound = '1';
+  const msg = el('er-settings-msg');
+  let config = {};
+  const fields = {
+    polling_interval_seconds: 'er-poll',
+    research_model: 'er-model',
+    required_subject_prefix: 'er-prefix',
+    maximum_request_length: 'er-max-request',
+    maximum_attachment_size: 'er-max-attachment',
+    maximum_simultaneous_jobs: 'er-concurrency',
+    maximum_requests_per_sender_per_day: 'er-sender-day',
+    maximum_total_jobs_per_day: 'er-total-day',
+    acknowledgement_template: 'er-ack-template',
+    final_email_template: 'er-final-template',
+    html_attachment_threshold: 'er-html-threshold',
+    retry_limit: 'er-retry-limit',
+    research_timeout_seconds: 'er-timeout',
+  };
+  const numeric = new Set([
+    'polling_interval_seconds', 'maximum_request_length', 'maximum_attachment_size',
+    'maximum_simultaneous_jobs', 'maximum_requests_per_sender_per_day',
+    'maximum_total_jobs_per_day', 'html_attachment_threshold', 'retry_limit',
+    'research_timeout_seconds',
+  ]);
+  const listFields = {
+    allowed_sender_addresses: 'er-allowed-addresses',
+    allowed_sender_domains: 'er-allowed-domains',
+    blocked_sender_patterns: 'er-blocked',
+  };
+  const splitList = value => String(value || '').split(/[\n,]/).map(v => v.trim()).filter(Boolean);
+  const show = (text, ok = true) => {
+    if (!msg) return;
+    msg.textContent = text;
+    msg.style.color = ok ? 'var(--green,#50fa7b)' : 'var(--red,#ff5555)';
+  };
+  const request = async (url, options = {}) => {
+    const response = await fetch(url, {
+      credentials: 'same-origin',
+      ...options,
+      headers: options.body ? { 'Content-Type': 'application/json', ...(options.headers || {}) } : options.headers,
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.detail || data.error || `Request failed (${response.status})`);
+    return data;
+  };
+  const option = (value, text) => {
+    const node = document.createElement('option');
+    node.value = value;
+    node.textContent = text;
+    return node;
+  };
+  const applyConfig = payload => {
+    config = { ...(payload || {}) };
+    el('er-enabled').checked = !!config.enabled;
+    el('er-account').value = config.email_account_id || '';
+    el('er-endpoint').value = config.research_endpoint_id || '';
+    el('er-plain-attachments').checked = !!config.allow_plain_text_attachments;
+    Object.entries(fields).forEach(([key, id]) => { if (el(id)) el(id).value = config[key] ?? ''; });
+    Object.entries(listFields).forEach(([key, id]) => { if (el(id)) el(id).value = (config[key] || []).join('\n'); });
+  };
+  const load = async () => {
+    try {
+      const data = await request('/api/email-research/settings');
+      const account = el('er-account');
+      const endpoint = el('er-endpoint');
+      account.innerHTML = '';
+      account.appendChild(option('', 'Select an account…'));
+      (data.accounts || []).forEach(a => account.appendChild(option(a.id, `${a.name} — ${a.from_address}${a.has_inbox && a.has_outbox ? '' : ' (incomplete)'}`)));
+      endpoint.innerHTML = '';
+      endpoint.appendChild(option('', 'Default Deep Research endpoint'));
+      (data.endpoints || []).forEach(ep => endpoint.appendChild(option(ep.id, ep.name)));
+      applyConfig(data.settings || {});
+    } catch (error) {
+      show(error.message, false);
+    }
+  };
+  const collect = () => {
+    const next = { ...config };
+    next.enabled = el('er-enabled').checked;
+    next.email_account_id = el('er-account').value;
+    next.research_endpoint_id = el('er-endpoint').value;
+    next.allow_plain_text_attachments = el('er-plain-attachments').checked;
+    Object.entries(fields).forEach(([key, id]) => {
+      const value = el(id).value;
+      next[key] = numeric.has(key) ? Number(value) : value;
+    });
+    Object.entries(listFields).forEach(([key, id]) => { next[key] = splitList(el(id).value); });
+    return next;
+  };
+  const save = async (overrides = {}) => {
+    try {
+      const next = { ...collect(), ...overrides };
+      const data = await request('/api/email-research/settings', {
+        method: 'PUT',
+        body: JSON.stringify(next),
+      });
+      applyConfig(data.settings);
+      show(next.enabled ? 'Automation settings saved' : 'Automation disabled');
+      await refreshStatus();
+    } catch (error) {
+      show(error.message, false);
+    }
+  };
+  const formatTime = value => value ? new Date(value).toLocaleString() : '—';
+  const renderStatus = data => {
+    const worker = data.worker || {};
+    el('er-worker-status').textContent = `${worker.running ? 'running' : 'idle'} · last ${formatTime(worker.last_inbox_poll)} · next ${formatTime(worker.next_inbox_poll)}`;
+    el('er-job-counts').textContent = Object.entries(data.counts || {}).map(([key, value]) => `${key.replace('_', ' ')}: ${value}`).join(' · ') || 'No jobs';
+    const body = el('er-jobs-body');
+    const jobs = data.jobs || [];
+    if (!jobs.length) {
+      body.innerHTML = '<tr><td colspan="5" style="padding:12px;opacity:.5">No email research jobs yet</td></tr>';
+      return;
+    }
+    body.innerHTML = jobs.map(job => {
+      const retry = job.state === 'failed'
+        ? `<button class="admin-btn-sm er-retry-job" data-job="${esc(job.id)}">Retry</button>` : '';
+      const cancel = ['received', 'acknowledged', 'research_queued', 'retry_wait'].includes(job.state)
+        ? `<button class="admin-btn-sm er-cancel-job" data-job="${esc(job.id)}">Cancel</button>` : '';
+      return `<tr style="border-top:1px solid var(--border)">
+        <td style="padding:7px 5px">${esc(job.state)}</td>
+        <td style="padding:7px 5px"><div>${esc(job.sender)}</div><div style="opacity:.65;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(job.subject)}</div></td>
+        <td style="padding:7px 5px">${esc(formatTime(job.updated_at))}</td>
+        <td style="padding:7px 5px"><div>${job.attempt_count || 0} attempt(s)</div><div style="opacity:.65;max-width:260px">${esc(job.error_summary || (job.next_retry_at ? `next ${formatTime(job.next_retry_at)}` : ''))}</div></td>
+        <td style="padding:7px 5px;white-space:nowrap">${retry}${cancel}</td>
+      </tr>`;
+    }).join('');
+  };
+  const refreshStatus = async () => {
+    try {
+      renderStatus(await request('/api/email-research/status'));
+    } catch (error) {
+      el('er-worker-status').textContent = error.message;
+    }
+  };
+  el('er-save').addEventListener('click', () => save());
+  el('er-disable').addEventListener('click', () => save({ enabled: false }));
+  el('er-run-now').addEventListener('click', async () => {
+    try {
+      show('Running worker cycle…');
+      const result = await request('/api/email-research/run-now', { method: 'POST' });
+      show(result.result === 'no-op' ? 'Worker already owns the cycle lock' : 'Worker cycle completed');
+      await refreshStatus();
+    } catch (error) { show(error.message, false); }
+  });
+  el('er-test-ack').addEventListener('click', async () => {
+    try {
+      const result = await request('/api/email-research/test-acknowledgement', { method: 'POST' });
+      show(`Test acknowledgement delivered (${result.provider_message_id || 'provider confirmed'})`);
+    } catch (error) { show(error.message, false); }
+  });
+  el('er-test-lifecycle').addEventListener('click', async () => {
+    try {
+      const result = await request('/api/email-research/test-lifecycle', { method: 'POST' });
+      show(`Mock lifecycle: ${result.result}; external services called: ${result.external_services_called}`);
+    } catch (error) { show(error.message, false); }
+  });
+  el('er-jobs-body').addEventListener('click', async event => {
+    const button = event.target.closest('[data-job]');
+    if (!button) return;
+    const action = button.classList.contains('er-retry-job') ? 'retry' : 'cancel';
+    try {
+      await request(`/api/email-research/jobs/${encodeURIComponent(button.dataset.job)}/${action}`, { method: 'POST' });
+      await refreshStatus();
+    } catch (error) { show(error.message, false); }
+  });
+  await load();
+  await refreshStatus();
 }
 
 async function initEmailSettings() {

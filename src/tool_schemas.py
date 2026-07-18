@@ -1374,17 +1374,20 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
         parts.append(args.get("content", ""))
         content = "\n".join(parts)
     elif tool_type == "edit_document":
-        blocks = []
-        edits = args.get("edits", [])
-        if not isinstance(edits, list):
-            edits = []
-        for edit in edits:
-            if not isinstance(edit, dict):
-                continue
-            blocks.append(
-                f'<<<FIND>>>\n{edit.get("find", "")}\n<<<REPLACE>>>\n{edit.get("replace", "")}\n<<<END>>>'
-            )
-        content = "\n".join(blocks)
+        if "document_id" in args or "operation" in args or "expected_version" in args:
+            content = "__ODYSSEUS_STRUCTURED_DOCUMENT__\n" + json.dumps(args)
+        else:
+            blocks = []
+            edits = args.get("edits", [])
+            if not isinstance(edits, list):
+                edits = []
+            for edit in edits:
+                if not isinstance(edit, dict):
+                    continue
+                blocks.append(
+                    f'<<<FIND>>>\n{edit.get("find", "")}\n<<<REPLACE>>>\n{edit.get("replace", "")}\n<<<END>>>'
+                )
+            content = "\n".join(blocks)
     elif tool_type == "suggest_document":
         blocks = []
         suggestions = args.get("suggestions", [])
@@ -1398,7 +1401,10 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
             )
         content = "\n".join(blocks)
     elif tool_type == "update_document":
-        content = args.get("content", "")
+        if "document_id" in args or "expected_version" in args:
+            content = "__ODYSSEUS_STRUCTURED_DOCUMENT__\n" + json.dumps(args)
+        else:
+            content = args.get("content", "")
     elif tool_type == "search_chats":
         content = args.get("query", "")
     elif tool_type == "chat_with_model":

@@ -37,6 +37,43 @@ DEFAULT_SETTINGS = {
     # have been observed inventing signatures and sending to real
     # recipients without confirmation.
     "agent_email_confirm": True,
+    # Deterministic email-to-Deep-Research automation. Credentials remain in
+    # EmailAccount rows; this object contains only policy and workflow knobs.
+    "email_research_automation": {
+        "enabled": False,
+        "email_account_id": "",
+        "research_endpoint_id": "",
+        "research_model": "",
+        "polling_interval_seconds": 60,
+        "required_subject_prefix": "",
+        "strip_subject_prefixes": ["Research:", "Deep Research:", "Request:"],
+        "allowed_sender_addresses": [],
+        "allowed_sender_domains": [],
+        "blocked_sender_patterns": ["no-reply", "noreply", "mailer-daemon"],
+        "maximum_request_length": 50000,
+        "maximum_attachment_size": 1048576,
+        "maximum_simultaneous_jobs": 2,
+        "maximum_requests_per_sender_per_day": 5,
+        "maximum_total_jobs_per_day": 50,
+        "acknowledgement_template": (
+            "Your research request has been received and is processing. "
+            "Reference: {{job_reference}}"
+        ),
+        "final_email_template": (
+            "Research is complete. A concise summary and the full report follow."
+        ),
+        "html_attachment_threshold": 200000,
+        "retry_limit": 5,
+        "research_timeout_seconds": 1800,
+        "allow_plain_text_attachments": True,
+        "server_research_instruction": (
+            "Produce a readable report with an executive summary, key findings, "
+            "source-linked evidence, conflicting evidence where applicable, "
+            "limitations and uncertainty, practical conclusions, and the "
+            "research date. Return well-structured content suitable for safe "
+            "HTML rendering."
+        ),
+    },
     "image_gen_enabled": False,
     "image_model": "",
     "image_quality": "medium",
@@ -108,6 +145,9 @@ DEFAULT_SETTINGS = {
     # Tune via Settings or by editing data/settings.json.
     "research_run_timeout_seconds": 1800,
     "agent_max_tool_calls": 0,
+    # Ornith private reasoning remains available as reasoning_content for
+    # protocol continuity, but is hidden from the UI unless explicitly enabled.
+    "ornith_show_reasoning": False,
     "agent_max_rounds": 20,  # per-message agent step cap (clamped 1..200)
     # Soft input-token budget for the agent loop. The DEFAULT value (6000) is the
     # "auto" sentinel: it means "scale the budget to the model's context window"

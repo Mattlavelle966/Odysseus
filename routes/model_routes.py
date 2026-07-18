@@ -1914,6 +1914,7 @@ def setup_model_routes(model_discovery):
                     "ping_error": (ping or {}).get("error") if ping else None,
                     "model_type": getattr(r, "model_type", None) or "llm",
                     "supports_tools": getattr(r, "supports_tools", None),
+                    "model_profile": getattr(r, "model_profile", None) or "auto",
                     "endpoint_kind": kind,
                     "category": _classify_endpoint(base, kind),
                     "model_refresh_mode": _endpoint_refresh_mode(r, kind),
@@ -2483,6 +2484,11 @@ def setup_model_routes(model_discovery):
                 if "model_refresh_timeout" in body:
                     timeout = _parse_positive_int(body.get("model_refresh_timeout"), minimum=1, maximum=60)
                     ep.model_refresh_timeout = timeout
+                if "model_profile" in body:
+                    profile = str(body.get("model_profile") or "auto").strip().lower()
+                    if profile not in {"auto", "default", "ornith"}:
+                        raise HTTPException(400, "model_profile must be auto, default, or ornith")
+                    ep.model_profile = profile
                 # Rotating an API key used to require DELETE+POST, which wiped
                 # endpoint_url/model from every session referencing the old base
                 # URL. Allow in-place updates so the admin can change the key
@@ -2516,9 +2522,56 @@ def setup_model_routes(model_discovery):
                 "model_refresh_mode": getattr(ep, "model_refresh_mode", None) or "auto",
                 "model_refresh_interval": getattr(ep, "model_refresh_interval", None),
                 "model_refresh_timeout": getattr(ep, "model_refresh_timeout", None),
+                "model_profile": getattr(ep, "model_profile", None) or "auto",
             }
         finally:
             db.close()
+
+    @router.post("/model-endpoints/{ep_id}/ornith-diagnostic")
+    async def ornith_endpoint_diagnostic(ep_id: str, request: Request):
+        """Verify real OpenAI tool_calls and explain llama.cpp requirements."""
+        require_admin(request)
+        user = effective_user(request) or ""
+        body = {}
+        try:
+            body = await request.json()
+        except Exception:
+            pass
+        db = SessionLocal()
+        try:
+            ep = db.query(ModelEndpoint).filter(ModelEndpoint.id == ep_id).first()
+            if not ep or not ep.is_enabled:
+                raise HTTPException(404, "Endpoint not found or disabled")
+            from src.endpoint_resolver import resolve_endpoint_runtime
+            base_url, api_key = resolve_endpoint_runtime(ep, owner=user)
+            model = str((body or {}).get("model") or "").strip()
+            if not model:
+                try:
+                    model = (json.loads(ep.cached_models or "[]") or [""])[0]
+                except Exception:
+                    model = ""
+            if not model:
+                raise HTTPException(400, "Choose a model for the diagnostic")
+            headers = build_headers(api_key, base_url)
+            endpoint_url = build_chat_url(base_url)
+        finally:
+            db.close()
+        from src.model_profiles import diagnose_ornith_endpoint
+        try:
+            return await diagnose_ornith_endpoint(
+                endpoint_url=endpoint_url,
+                model=model,
+                headers=headers,
+            )
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code if exc.response is not None else 502
+            raise HTTPException(
+                502,
+                f"Endpoint diagnostic failed with HTTP {status}. "
+                "Check the llama.cpp chat template and Jinja/tool-call support.",
+            )
+        except Exception as exc:
+            raise HTTPException(502, f"Endpoint diagnostic failed: {type(exc).__name__}")
 
     def _settings_using_endpoint(ep_id: str) -> list:
         """Return human-readable labels for settings that reference this endpoint."""

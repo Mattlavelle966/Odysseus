@@ -5,7 +5,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 from urllib.parse import unquote, urlparse
-from sqlalchemy import event, create_engine, Column, String, Text, Boolean, DateTime, Integer, ForeignKey, JSON, Index, func, text
+from sqlalchemy import (
+    event, create_engine, Column, String, Text, Boolean, DateTime, Integer,
+    ForeignKey, JSON, Index, UniqueConstraint, func, text,
+)
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.types import TypeDecorator
 from sqlalchemy.ext.declarative import declarative_base, declared_attr
@@ -144,6 +147,17 @@ def set_sqlite_pragma(dbapi_connection, connection_record):
     if isinstance(dbapi_connection, sqlite3.Connection):
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA foreign_keys=ON")
+        # The email-research worker shares the application's database layer.
+        # WAL allows its short claim/state-transition transactions to coexist
+        # safely with normal request traffic; busy_timeout turns brief writer
+        # contention into bounded waiting instead of spurious failures.
+        cursor.execute("PRAGMA busy_timeout=10000")
+        try:
+            cursor.execute("PRAGMA journal_mode=WAL")
+        except sqlite3.DatabaseError:
+            # In-memory/read-only SQLite connections cannot always switch
+            # journal modes. Foreign-key and timeout configuration still apply.
+            pass
         cursor.close()
 
 
@@ -430,6 +444,75 @@ class EmailAccount(TimestampMixin, Base):
     )
 
 
+class EmailResearchJob(TimestampMixin, Base):
+    """Durable email-to-Deep-Research workflow state.
+
+    Queue ownership lives here rather than in the generic scheduled-agent
+    runner.  ``lease_*`` fields make a crashed cycle recoverable, while the
+    provider Message-ID and delivery idempotency keys prevent duplicate jobs
+    and duplicate acknowledgement/final messages.
+    """
+    __tablename__ = "email_research_jobs"
+
+    id = Column(String, primary_key=True)
+    owner = Column(String, nullable=False, index=True)
+    email_account_id = Column(String, ForeignKey("email_accounts.id"), nullable=False, index=True)
+    provider_message_identifier = Column(String, nullable=False)
+    rfc_message_id = Column(String, nullable=False)
+    sender_address = Column(String, nullable=False)
+    reply_to_address = Column(String, nullable=False)
+    original_recipient = Column(String, nullable=False, default="")
+    original_subject = Column(Text, nullable=False, default="")
+    references_header = Column(Text, nullable=False, default="")
+    in_reply_to_header = Column(Text, nullable=False, default="")
+    sanitized_html_body = Column(Text, nullable=False, default="")
+    sanitized_request_text = Column(Text, nullable=False)
+    request_hash = Column(String(64), nullable=False, index=True)
+    received_at = Column(DateTime, nullable=False, index=True)
+
+    state = Column(String, nullable=False, default="received", index=True)
+    acknowledgement_status = Column(String, nullable=False, default="pending")
+    acknowledgement_at = Column(DateTime, nullable=True)
+    acknowledgement_idempotency_key = Column(String(96), nullable=False, unique=True)
+    acknowledgement_provider_id = Column(String, nullable=True)
+
+    research_session_id = Column(String, nullable=True, unique=True, index=True)
+    research_status = Column(String, nullable=False, default="pending")
+    research_model = Column(String, nullable=True)
+    final_report_location = Column(Text, nullable=True)
+    final_report_identifier = Column(String, nullable=True)
+
+    attempt_count = Column(Integer, nullable=False, default=0)
+    next_retry_at = Column(DateTime, nullable=True, index=True)
+    last_error_category = Column(String, nullable=True)
+    last_error_summary = Column(Text, nullable=True)
+
+    final_delivery_status = Column(String, nullable=False, default="pending")
+    final_delivery_idempotency_key = Column(String(96), nullable=False, unique=True)
+    final_provider_delivery_identifier = Column(String, nullable=True)
+    result_status = Column(String, nullable=False, default="retrying")
+    result_summary_json = Column(Text, nullable=True)
+
+    lease_owner = Column(String, nullable=True, index=True)
+    lease_until = Column(DateTime, nullable=True, index=True)
+    completed_at = Column(DateTime, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "owner", "email_account_id", "rfc_message_id",
+            name="uq_email_research_owner_account_message",
+        ),
+        Index(
+            "ix_email_research_due",
+            "state", "next_retry_at", "lease_until",
+        ),
+        Index(
+            "ix_email_research_sender_day",
+            "owner", "sender_address", "received_at",
+        ),
+    )
+
+
 class ModelEndpoint(TimestampMixin, Base):
     """Admin-configured model endpoints. Models are auto-discovered via /v1/models."""
     __tablename__ = "model_endpoints"
@@ -457,6 +540,10 @@ class ModelEndpoint(TimestampMixin, Base):
     # can be toggled per-endpoint in the UI. NULL = unknown, falls
     # back to the model-name keyword heuristic in agent_loop.py.
     supports_tools = Column(Boolean, nullable=True, default=None)
+    # Central profile override: "auto" (identifier detection), "default"
+    # (force unchanged generic behavior), or "ornith". Profile-specific logic
+    # lives only in src.model_profiles.
+    model_profile = Column(String, nullable=True, default="auto")
     # Per-user ownership. NULL = legacy/shared (visible to every user) — this
     # is the historical default. When non-null, the model picker only shows
     # the endpoint to that user (admins always see everything).
@@ -734,6 +821,8 @@ class TaskRun(Base):
     tokens_used = Column(Integer, nullable=True)
     steps       = Column(Text, nullable=True)             # JSON log of agent tool calls
     model       = Column(String, nullable=True)           # model that actually ran (resolved at execution)
+    result_status = Column(String, nullable=True)         # success/no-op/rejected/retrying/partial/failed/cancelled
+    result_summary_json = Column(Text, nullable=True)     # machine-readable execution evidence
 
     task = relationship("ScheduledTask", backref=backref("runs", cascade="all, delete-orphan",
                         order_by="TaskRun.started_at.desc()"))
@@ -1070,6 +1159,88 @@ def _migrate_add_supports_tools_column():
             conn.close()
         except Exception:
             pass
+
+
+def _migrate_add_model_profile_column():
+    """Add the centralized model-profile override to existing endpoints."""
+    if not DATABASE_URL.startswith("sqlite"):
+        return
+    db_path = DATABASE_URL.replace("sqlite:///", "")
+    if not os.path.exists(db_path):
+        return
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        columns = [
+            row[1]
+            for row in conn.execute("PRAGMA table_info(model_endpoints)").fetchall()
+        ]
+        if columns and "model_profile" not in columns:
+            conn.execute(
+                "ALTER TABLE model_endpoints "
+                "ADD COLUMN model_profile TEXT DEFAULT 'auto'"
+            )
+            conn.commit()
+            logger.info("Migrated: added model_profile to model_endpoints")
+    except Exception as exc:
+        logger.warning("model_profile migration failed: %s", exc)
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def _migrate_add_task_result_columns():
+    """Add machine-readable task outcomes without changing legacy status."""
+    if not DATABASE_URL.startswith("sqlite"):
+        return
+    db_path = DATABASE_URL.replace("sqlite:///", "")
+    if not os.path.exists(db_path):
+        return
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(task_runs)").fetchall()
+        }
+        if columns and "result_status" not in columns:
+            conn.execute("ALTER TABLE task_runs ADD COLUMN result_status TEXT")
+        if columns and "result_summary_json" not in columns:
+            conn.execute("ALTER TABLE task_runs ADD COLUMN result_summary_json TEXT")
+        conn.commit()
+    except Exception as exc:
+        logger.warning("task result migration failed: %s", exc)
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def _migrate_email_research_columns():
+    """Keep pre-release development copies of the new queue schema additive."""
+    if not DATABASE_URL.startswith("sqlite"):
+        return
+    db_path = DATABASE_URL.replace("sqlite:///", "")
+    if not os.path.exists(db_path):
+        return
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        columns = {
+            row[1]
+            for row in conn.execute(
+                "PRAGMA table_info(email_research_jobs)"
+            ).fetchall()
+        }
+        if columns and "sanitized_html_body" not in columns:
+            conn.execute(
+                "ALTER TABLE email_research_jobs "
+                "ADD COLUMN sanitized_html_body TEXT NOT NULL DEFAULT ''"
+            )
+            conn.commit()
+    except Exception as exc:
+        logger.warning("email research column migration failed: %s", exc)
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def _migrate_add_cached_models_column():
@@ -1935,7 +2106,10 @@ def init_db():
     _migrate_add_model_endpoint_owner_column()
     _migrate_add_provider_auth_id_column()
     _migrate_add_supports_tools_column()
+    _migrate_add_model_profile_column()
     _migrate_add_task_run_model_column()
+    _migrate_add_task_result_columns()
+    _migrate_email_research_columns()
     _migrate_add_owner_column()
     _migrate_add_document_archived_column()
     _migrate_add_last_message_at_column()

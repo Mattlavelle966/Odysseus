@@ -226,6 +226,62 @@ def parse_edit_blocks(content: str) -> list:
         edits.append({"find": m.group(1), "replace": m.group(2)})
     return edits
 
+
+_STRUCTURED_DOCUMENT_MARKER = "__ODYSSEUS_STRUCTURED_DOCUMENT__\n"
+
+
+def _parse_structured_document_request(content: str) -> Optional[dict]:
+    """Parse the profile-only envelope; never infer document actions from prose."""
+    if not isinstance(content, str) or not content.startswith(_STRUCTURED_DOCUMENT_MARKER):
+        return None
+    try:
+        value = __import__("json").loads(content[len(_STRUCTURED_DOCUMENT_MARKER):])
+    except Exception:
+        return {"_invalid": "Structured document arguments are not valid JSON"}
+    if not isinstance(value, dict):
+        return {"_invalid": "Structured document arguments must be an object"}
+    return value
+
+
+def _structured_document_content(current: str, request: dict) -> tuple[Optional[str], Optional[str]]:
+    """Validate and compute one structured edit without mutating the document."""
+    operation = str(request.get("operation") or "").strip()
+    text = str(request.get("text") or "")
+    if operation == "read":
+        return current, None
+    if operation == "replace_all":
+        return text, None
+    if operation == "append":
+        return current + text, None
+    if operation == "insert":
+        start = request.get("start")
+        if not isinstance(start, int) or start < 0 or start > len(current):
+            return None, "Insert position is outside the document"
+        return current[:start] + text + current[start:], None
+    if operation == "replace_range":
+        start, end = request.get("start"), request.get("end")
+        if (
+            not isinstance(start, int)
+            or not isinstance(end, int)
+            or start < 0
+            or end < start
+            or end > len(current)
+        ):
+            return None, "Replacement range is outside the document"
+        return current[:start] + text + current[end:], None
+    if operation == "exact_patch":
+        find, replace = request.get("find"), request.get("replace")
+        if not isinstance(find, str) or not find:
+            return None, "Exact patch requires non-empty find text"
+        if not isinstance(replace, str):
+            return None, "Exact patch replacement must be text"
+        occurrences = current.count(find)
+        if occurrences != 1:
+            return None, f"Exact patch expected one match, found {occurrences}"
+        return current.replace(find, replace, 1), None
+    return None, f"Unsupported document operation: {operation or '(missing)'}"
+
+
 def parse_suggest_blocks(content: str) -> list:
     """Parse <<<FIND>>>...<<<SUGGEST>>>...<<<REASON>>>...<<<END>>> blocks."""
     suggestions = []
@@ -305,6 +361,7 @@ def _create_pdf_text_derivative(db, *, source_doc, content: str, owner: Optional
     set_active_document(doc_id)
     return {
         "action": "create",
+        "result": "success",
         "doc_id": doc_id,
         "title": title,
         "language": "markdown",
@@ -428,6 +485,7 @@ class CreateDocumentTool:
 
             return {
                 "action": "create",
+                "result": "success",
                 "doc_id": doc_id,
                 "title": title,
                 "language": language,
@@ -446,7 +504,14 @@ class UpdateDocumentTool:
         import uuid
         from src.database import SessionLocal, Document, DocumentVersion
 
-        target_id = ctx.get("doc_id", None) or _active_document_id
+        structured = _parse_structured_document_request(content)
+        if structured and structured.get("_invalid"):
+            return {"error": structured["_invalid"], "exit_code": 1}
+        target_id = (
+            structured.get("document_id")
+            if structured is not None
+            else ctx.get("doc_id", None) or _active_document_id
+        )
         owner = ctx.get("owner")
 
         db = SessionLocal()
@@ -454,7 +519,7 @@ class UpdateDocumentTool:
             doc = None
             if target_id:
                 doc = _get_owned_document(db, Document, target_id, owner)
-            if not doc:
+            if not doc and structured is None:
                 doc = _most_recent_owned_document(db, Document, owner)
                 if doc:
                     target_id = doc.id
@@ -462,9 +527,35 @@ class UpdateDocumentTool:
                     logger.info(f"update_document: fell back to most recent doc id={target_id}")
             if not doc:
                 return {"error": "No documents exist to update"}
+            if structured is not None:
+                expected = structured.get("expected_version")
+                if not isinstance(expected, int) or expected != doc.version_count:
+                    return {
+                        "error": (
+                            f"Document version conflict: expected {expected}, "
+                            f"current {doc.version_count}"
+                        ),
+                        "result": "rejected",
+                        "current_version": doc.version_count,
+                        "exit_code": 1,
+                    }
 
             is_email_doc = doc.language == "email" or _looks_like_email_document(doc.current_content or "", doc.title or "")
-            new_content = _coerce_email_document_content(doc.current_content or "", content) if is_email_doc else content.strip()
+            requested_content = (
+                str(structured.get("content") or "")
+                if structured is not None else content
+            )
+            new_content = (
+                _coerce_email_document_content(
+                    doc.current_content or "", requested_content
+                )
+                if is_email_doc
+                else (
+                    requested_content
+                    if structured is not None
+                    else requested_content.strip()
+                )
+            )
             if is_email_doc:
                 doc.language = "email"
 
@@ -484,6 +575,17 @@ class UpdateDocumentTool:
                     summary=f"Created from PDF edit by {_active_model or 'AI'}",
                 )
 
+            if structured is not None and new_content == doc.current_content:
+                return {
+                    "action": "update",
+                    "doc_id": doc.id,
+                    "title": doc.title,
+                    "language": doc.language,
+                    "content": doc.current_content,
+                    "version": doc.version_count,
+                    "result": "no-op",
+                }
+
             new_ver = doc.version_count + 1
             ver = DocumentVersion(
                 id=str(uuid.uuid4()),
@@ -493,8 +595,27 @@ class UpdateDocumentTool:
                 summary=f"Updated by {_active_model or 'AI'}",
                 source="ai",
             )
-            doc.current_content = new_content
-            doc.version_count = new_ver
+            if structured is not None:
+                changed = db.query(Document).filter(
+                    Document.id == target_id,
+                    Document.version_count == structured["expected_version"],
+                ).update(
+                    {
+                        Document.current_content: new_content,
+                        Document.version_count: new_ver,
+                    },
+                    synchronize_session=False,
+                )
+                if changed != 1:
+                    db.rollback()
+                    return {
+                        "error": "Document changed concurrently; read the current version and retry",
+                        "result": "rejected",
+                        "exit_code": 1,
+                    }
+            else:
+                doc.current_content = new_content
+                doc.version_count = new_ver
             db.add(ver)
             db.commit()
 
@@ -505,6 +626,7 @@ class UpdateDocumentTool:
                 "language": doc.language,
                 "content": new_content,
                 "version": new_ver,
+                "result": "success",
             }
         except Exception as e:
             db.rollback()
@@ -518,11 +640,18 @@ class EditDocumentTool:
         import uuid
         from src.database import SessionLocal, Document, DocumentVersion
 
-        target_id = ctx.get("doc_id", None) or _active_document_id
+        structured = _parse_structured_document_request(content)
+        if structured and structured.get("_invalid"):
+            return {"error": structured["_invalid"], "exit_code": 1}
+        target_id = (
+            structured.get("document_id")
+            if structured is not None
+            else ctx.get("doc_id", None) or _active_document_id
+        )
         owner = ctx.get("owner")
 
-        edits = parse_edit_blocks(content)
-        if not edits:
+        edits = parse_edit_blocks(content) if structured is None else []
+        if structured is None and not edits:
             return {"error": "No valid <<<FIND>>>...<<<REPLACE>>>...<<<END>>> blocks found"}
 
         db = SessionLocal()
@@ -530,7 +659,7 @@ class EditDocumentTool:
             doc = None
             if target_id:
                 doc = _get_owned_document(db, Document, target_id, owner)
-            if not doc:
+            if not doc and structured is None:
                 # Fallback: most recently updated document. Avoids "no active doc" errors
                 # after server restart or when the agent loses track of which doc to edit.
                 doc = _most_recent_owned_document(db, Document, owner)
@@ -541,8 +670,54 @@ class EditDocumentTool:
             if not doc:
                 return {"error": "No documents exist to edit"}
 
+            if structured is not None:
+                expected = structured.get("expected_version")
+                if not isinstance(expected, int) or expected != doc.version_count:
+                    return {
+                        "error": (
+                            f"Document version conflict: expected {expected}, "
+                            f"current {doc.version_count}"
+                        ),
+                        "result": "rejected",
+                        "current_version": doc.version_count,
+                        "exit_code": 1,
+                    }
+                updated_content, validation_error = _structured_document_content(
+                    doc.current_content or "", structured
+                )
+                if validation_error:
+                    return {
+                        "error": validation_error,
+                        "result": "rejected",
+                        "exit_code": 1,
+                    }
+                if structured.get("operation") == "read":
+                    return {
+                        "action": "read",
+                        "doc_id": doc.id,
+                        "title": doc.title,
+                        "language": doc.language,
+                        "content": doc.current_content,
+                        "version": doc.version_count,
+                        "result": "success",
+                    }
+                if updated_content == doc.current_content:
+                    return {
+                        "action": "edit",
+                        "doc_id": doc.id,
+                        "title": doc.title,
+                        "version": doc.version_count,
+                        "applied": 0,
+                        "result": "no-op",
+                    }
+                applied = 1
+                skipped = 0
+
             is_email_doc = doc.language == "email" or _looks_like_email_document(doc.current_content or "", doc.title or "")
-            blank_find_edits = [e for e in edits if not (e.get("find") or "").strip()]
+            blank_find_edits = (
+                [e for e in edits if not (e.get("find") or "").strip()]
+                if structured is None else []
+            )
             if blank_find_edits:
                 if is_email_doc:
                     replacement_body = (blank_find_edits[0].get("replace") or "").strip()
@@ -583,9 +758,10 @@ class EditDocumentTool:
                     }
                 return {"error": "No edits applied — FIND text cannot be blank"}
 
-            updated_content = doc.current_content
-            applied = 0
-            skipped = 0
+            if structured is None:
+                updated_content = doc.current_content
+                applied = 0
+                skipped = 0
             for edit in edits:
                 _find = edit["find"]
                 if _find in updated_content:
@@ -607,7 +783,7 @@ class EditDocumentTool:
                         logger.warning(f"edit_document: FIND text not found, skipping: {_find[:80]!r}")
                         skipped += 1
 
-            if applied == 0:
+            if applied == 0 and structured is None:
                 return {"error": f"No edits applied — none of the FIND blocks matched the document content (skipped {skipped})"}
 
             missing_id = _missing_document_upload(owner, updated_content)
@@ -635,8 +811,27 @@ class EditDocumentTool:
                 summary=f"Edited by {_active_model or 'AI'} ({applied} edit(s))",
                 source="ai",
             )
-            doc.current_content = updated_content
-            doc.version_count = new_ver
+            if structured is not None:
+                changed = db.query(Document).filter(
+                    Document.id == target_id,
+                    Document.version_count == structured["expected_version"],
+                ).update(
+                    {
+                        Document.current_content: updated_content,
+                        Document.version_count: new_ver,
+                    },
+                    synchronize_session=False,
+                )
+                if changed != 1:
+                    db.rollback()
+                    return {
+                        "error": "Document changed concurrently; read the current version and retry",
+                        "result": "rejected",
+                        "exit_code": 1,
+                    }
+            else:
+                doc.current_content = updated_content
+                doc.version_count = new_ver
             db.add(ver)
             db.commit()
 
@@ -649,6 +844,7 @@ class EditDocumentTool:
                 "version": new_ver,
                 "applied": applied,
                 "skipped": skipped,
+                "result": "success",
             }
         except Exception as e:
             db.rollback()

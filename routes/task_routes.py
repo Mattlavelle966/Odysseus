@@ -240,6 +240,14 @@ def _task_to_dict(t: ScheduledTask, include_last_run_result: bool = False) -> di
     return d
 
 
+def _task_result_summary(raw: str | None) -> dict:
+    try:
+        value = json.loads(raw or "{}")
+        return value if isinstance(value, dict) else {}
+    except (TypeError, ValueError):
+        return {}
+
+
 def _run_to_dict(r: TaskRun) -> dict:
     return {
         "id": r.id,
@@ -251,6 +259,10 @@ def _run_to_dict(r: TaskRun) -> dict:
         "error": r.error,
         "tokens_used": r.tokens_used,
         "model": r.model,
+        "result_status": getattr(r, "result_status", None),
+        "result_summary": _task_result_summary(
+            getattr(r, "result_summary_json", None)
+        ),
     }
 
 
