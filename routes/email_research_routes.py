@@ -2,14 +2,23 @@
 
 from __future__ import annotations
 
+import asyncio
 import email
 import json
 import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import StreamingResponse
+from sqlalchemy.exc import IntegrityError
 
-from core.database import EmailAccount, EmailResearchJob, ModelEndpoint, SessionLocal
+from core.database import (
+    EmailAccount,
+    EmailResearchAutomation,
+    EmailResearchJob,
+    ModelEndpoint,
+    SessionLocal,
+)
 from src.auth_helpers import require_user
 from src.email_research import (
     AUTOMATION_HEADER,
@@ -47,6 +56,261 @@ def setup_email_research_routes(worker: EmailResearchWorker) -> APIRouter:
             return row
         finally:
             db.close()
+
+    def normalize_config(body: dict, owner: str) -> tuple[str, EmailResearchConfig]:
+        if not isinstance(body, dict):
+            raise HTTPException(400, "Automation must be an object")
+        name = str(body.get("name") or "").strip()[:120]
+        if not name:
+            raise HTTPException(400, "Automation name is required")
+        raw = dict(body.get("config") or body)
+        raw.pop("id", None)
+        raw.pop("name", None)
+        raw.pop("config", None)
+        raw.pop("research_max_rounds", None)
+        allowed = set(EmailResearchConfig.__dataclass_fields__)
+        unknown = sorted(set(raw) - allowed)
+        if unknown:
+            raise HTTPException(400, f"Unknown setting(s): {', '.join(unknown)}")
+        account_id = str(raw.get("email_account_id") or "").strip()
+        if not account_id:
+            raise HTTPException(400, "Select an email account")
+        account = account_for_owner(account_id, owner)
+        if not (account.imap_host and account.imap_user):
+            raise HTTPException(400, "Selected account has no inbox configuration")
+        if not (account.smtp_host and account.from_address):
+            raise HTTPException(400, "Selected account has no outbound configuration")
+        for key in (
+            "allowed_sender_addresses",
+            "allowed_sender_domains",
+            "blocked_sender_patterns",
+            "strip_subject_prefixes",
+        ):
+            if isinstance(raw.get(key), str):
+                raw[key] = [
+                    item.strip()
+                    for item in raw[key].replace("\n", ",").split(",")
+                    if item.strip()
+                ]
+        return name, EmailResearchConfig.from_raw(raw)
+
+    def instance_payload(row: EmailResearchAutomation) -> dict:
+        config = EmailResearchConfig.from_raw(
+            {
+                **json.loads(row.config_json or "{}"),
+                "enabled": row.enabled,
+                "email_account_id": row.email_account_id,
+            }
+        )
+        return {
+            "id": row.id,
+            "name": row.name,
+            "owner": row.owner,
+            "config": config.to_dict(),
+            "created_at": row.created_at.isoformat() + "Z",
+            "updated_at": row.updated_at.isoformat() + "Z",
+        }
+
+    def automation_for_owner(
+        automation_id: str, owner: str
+    ) -> EmailResearchAutomation:
+        db = SessionLocal()
+        try:
+            row = db.query(EmailResearchAutomation).filter(
+                EmailResearchAutomation.id == automation_id,
+                EmailResearchAutomation.owner == owner,
+            ).first()
+            if not row:
+                raise HTTPException(404, "Automation not found")
+            db.expunge(row)
+            return row
+        finally:
+            db.close()
+
+    def config_for_automation(
+        automation_id: str, owner: str
+    ) -> EmailResearchConfig:
+        row = automation_for_owner(automation_id, owner)
+        return EmailResearchConfig.from_raw(
+            {
+                **json.loads(row.config_json or "{}"),
+                "enabled": row.enabled,
+                "email_account_id": row.email_account_id,
+            }
+        )
+
+    def resource_options(owner: str) -> dict:
+        db = SessionLocal()
+        try:
+            accounts = db.query(EmailAccount).filter(
+                EmailAccount.enabled == True,  # noqa: E712
+                (EmailAccount.owner == owner)
+                | (EmailAccount.owner.is_(None))
+                | (EmailAccount.owner == ""),
+            ).order_by(
+                EmailAccount.is_default.desc(), EmailAccount.created_at.asc()
+            ).all()
+            endpoints = db.query(ModelEndpoint).filter(
+                ModelEndpoint.is_enabled == True,  # noqa: E712
+                ModelEndpoint.model_type != "image",
+                (ModelEndpoint.owner == owner) | (ModelEndpoint.owner.is_(None)),
+            ).order_by(ModelEndpoint.name.asc()).all()
+            return {
+                "accounts": [
+                    {
+                        "id": row.id,
+                        "name": row.name,
+                        "from_address": row.from_address,
+                        "has_inbox": bool(row.imap_host and row.imap_user),
+                        "has_outbox": bool(row.smtp_host and row.from_address),
+                    }
+                    for row in accounts
+                ],
+                "endpoints": [
+                    {
+                        "id": row.id,
+                        "name": row.name,
+                        "cached_models": json.loads(row.cached_models or "[]"),
+                    }
+                    for row in endpoints
+                ],
+            }
+        finally:
+            db.close()
+
+    @router.get("/instances")
+    async def list_automations(request: Request):
+        owner = require_admin(request)
+        db = SessionLocal()
+        try:
+            rows = db.query(EmailResearchAutomation).filter(
+                EmailResearchAutomation.owner == owner
+            ).order_by(
+                EmailResearchAutomation.created_at.asc(),
+                EmailResearchAutomation.id.asc(),
+            ).all()
+            return {
+                "instances": [instance_payload(row) for row in rows],
+                **resource_options(owner),
+            }
+        finally:
+            db.close()
+
+    @router.post("/instances")
+    async def create_automation(request: Request):
+        owner = require_admin(request)
+        name, config = normalize_config(await request.json(), owner)
+        db = SessionLocal()
+        try:
+            row = EmailResearchAutomation(
+                id=uuid.uuid4().hex,
+                owner=owner,
+                name=name,
+                enabled=config.enabled,
+                email_account_id=config.email_account_id,
+                config_json=json.dumps(config.to_dict()),
+            )
+            db.add(row)
+            db.commit()
+            db.refresh(row)
+            worker._wake.set()
+            return instance_payload(row)
+        except IntegrityError:
+            db.rollback()
+            raise HTTPException(409, "An automation with that name already exists")
+        finally:
+            db.close()
+
+    @router.put("/instances/{automation_id}")
+    async def update_automation(
+        automation_id: str, request: Request
+    ):
+        owner = require_admin(request)
+        name, config = normalize_config(await request.json(), owner)
+        db = SessionLocal()
+        try:
+            row = db.query(EmailResearchAutomation).filter(
+                EmailResearchAutomation.id == automation_id,
+                EmailResearchAutomation.owner == owner,
+            ).first()
+            if not row:
+                raise HTTPException(404, "Automation not found")
+            row.name = name
+            row.enabled = config.enabled
+            row.email_account_id = config.email_account_id
+            row.config_json = json.dumps(config.to_dict())
+            db.commit()
+            db.refresh(row)
+            worker._next_due.pop(automation_id, None)
+            worker._wake.set()
+            return instance_payload(row)
+        except IntegrityError:
+            db.rollback()
+            raise HTTPException(409, "An automation with that name already exists")
+        finally:
+            db.close()
+
+    @router.delete("/instances/{automation_id}")
+    async def delete_automation(automation_id: str, request: Request):
+        owner = require_admin(request)
+        db = SessionLocal()
+        try:
+            row = db.query(EmailResearchAutomation).filter(
+                EmailResearchAutomation.id == automation_id,
+                EmailResearchAutomation.owner == owner,
+            ).first()
+            if not row:
+                raise HTTPException(404, "Automation not found")
+            has_jobs = db.query(EmailResearchJob.id).filter(
+                EmailResearchJob.automation_id == automation_id
+            ).first()
+            if has_jobs:
+                raise HTTPException(
+                    409,
+                    "Disable this automation instead; its job history is retained",
+                )
+            db.delete(row)
+            db.commit()
+            worker._instance_status.pop(automation_id, None)
+            worker._next_due.pop(automation_id, None)
+            worker._wake.set()
+            return {"result": "deleted", "automation_id": automation_id}
+        finally:
+            db.close()
+
+    @router.post("/instances/{automation_id}/run-now")
+    async def run_instance_now(automation_id: str, request: Request):
+        owner = require_admin(request)
+        automation_for_owner(automation_id, owner)
+        return await worker.run_now(automation_id)
+
+    @router.get("/events")
+    async def live_events(request: Request, automation_id: str = ""):
+        owner = require_admin(request)
+        selected = automation_id.strip() or None
+        if selected:
+            automation_for_owner(selected, owner)
+
+        async def stream():
+            while True:
+                if await request.is_disconnected():
+                    return
+                payload = worker.dashboard(
+                    owner, limit=100, automation_id=selected
+                )
+                yield "event: status\ndata: " + json.dumps(
+                    payload, separators=(",", ":"), default=str
+                ) + "\n\n"
+                await asyncio.sleep(2)
+
+        return StreamingResponse(
+            stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     @router.get("/settings")
     async def get_automation_settings(request: Request):
@@ -153,9 +417,15 @@ def setup_email_research_routes(worker: EmailResearchWorker) -> APIRouter:
         return {"settings": normalized}
 
     @router.get("/status")
-    async def automation_status(request: Request, limit: int = 100):
+    async def automation_status(
+        request: Request, limit: int = 100, automation_id: str = ""
+    ):
         owner = require_admin(request)
-        return worker.dashboard(owner, limit=max(1, min(500, int(limit))))
+        return worker.dashboard(
+            owner,
+            limit=max(1, min(500, int(limit))),
+            automation_id=automation_id.strip() or None,
+        )
 
     @router.post("/run-now")
     async def run_now(request: Request):
@@ -184,9 +454,15 @@ def setup_email_research_routes(worker: EmailResearchWorker) -> APIRouter:
         return {"result": "stopping", "job_id": job_id}
 
     @router.post("/test-acknowledgement")
-    async def test_acknowledgement(request: Request):
+    async def test_acknowledgement(
+        request: Request, automation_id: str = ""
+    ):
         owner = require_admin(request)
-        config = EmailResearchConfig.load()
+        config = (
+            config_for_automation(automation_id, owner)
+            if automation_id
+            else EmailResearchConfig.load()
+        )
         if not config.email_account_id:
             raise HTTPException(400, "Select an email account first")
         account = account_for_owner(config.email_account_id, owner)
@@ -218,10 +494,14 @@ def setup_email_research_routes(worker: EmailResearchWorker) -> APIRouter:
         return {"result": "success", "provider_message_id": provider_id}
 
     @router.post("/test-lifecycle")
-    async def test_lifecycle(request: Request):
+    async def test_lifecycle(request: Request, automation_id: str = ""):
         """Dry-run the parser, policy, prompt boundary, and renderer with mock mail."""
         owner = require_admin(request)
-        config = EmailResearchConfig.load()
+        config = (
+            config_for_automation(automation_id, owner)
+            if automation_id
+            else EmailResearchConfig.load()
+        )
         account = account_for_owner(config.email_account_id, owner) if config.email_account_id else None
         raw = (
             "From: approved@example.test\r\n"

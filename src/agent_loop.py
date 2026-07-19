@@ -2182,9 +2182,13 @@ def _resolve_tool_blocks(
 ):
     """Choose native function calls or fenced code block parsing. Returns (tool_blocks, used_native)."""
     used_native = False
+    # A structured-only profile may legitimately return ordinary text with no
+    # tool_calls. Keep that as the empty-tool terminal response instead of
+    # falling through with an unbound local (the Ornith chat finalization
+    # regression).
+    tool_blocks = []
     converted_calls = []  # native calls that converted, ALIGNED with tool_blocks
     if native_tool_calls:
-        tool_blocks = []
         for tc in native_tool_calls:
             tc_name = tc.get("name", "")
             tc_args = tc.get("arguments", "{}")

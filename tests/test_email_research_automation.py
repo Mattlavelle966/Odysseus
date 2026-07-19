@@ -8,7 +8,12 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from core.database import Base, EmailAccount, EmailResearchJob
+from core.database import (
+    Base,
+    EmailAccount,
+    EmailResearchAutomation,
+    EmailResearchJob,
+)
 import src.email_research as er
 
 
@@ -200,7 +205,7 @@ def test_full_mocked_lifecycle_is_exactly_once_and_threaded(workflow):
     <p>A finding with <a href="https://example.com">source</a>.</p>
     </body></html>
     """
-    second = run(worker.run_cycle())
+    second = run(worker.run_cycle(force=True))
     assert second["ignored_or_duplicate"] == 1
     assert len(research.starts) == 1
     assert len(mail.sent) == 2
@@ -278,7 +283,7 @@ def test_disabling_intake_does_not_strand_an_accepted_job(
     result = run(worker.run_cycle())
 
     assert result["result"] == "success"
-    assert result["reason"] == "automation_disabled_intake"
+    assert result["instances_polled"] == 0
     assert result["jobs_progressed"] == 1
     assert len(all_jobs(Session)) == 1
     assert all_jobs(Session)[0].state == "delivered"
@@ -299,6 +304,96 @@ def test_two_worker_cycles_cannot_create_or_claim_the_same_job_twice(workflow):
     assert len(all_jobs(Session)) == 1
     assert len(research.starts) == 1
     assert len(mail.sent) == 1
+
+
+def test_multiple_automations_route_by_sender_and_snapshot_depth(workflow):
+    Session, config = workflow
+    db = Session()
+    quick = er.EmailResearchConfig(
+        **{
+            **config.__dict__,
+            "research_depth_preset": "quick",
+            "research_rounds": 2,
+            "research_source_limit": 12,
+            "research_timeout_seconds": 600,
+            "allowed_sender_addresses": ("first@example.com",),
+            "allowed_sender_domains": (),
+        }
+    )
+    deep = er.EmailResearchConfig(
+        **{
+            **config.__dict__,
+            "research_depth_preset": "deep",
+            "research_rounds": 5,
+            "research_source_limit": 60,
+            "research_timeout_seconds": 5400,
+            "allowed_sender_addresses": ("second@example.com",),
+            "allowed_sender_domains": (),
+        }
+    )
+    db.add_all(
+        [
+            EmailResearchAutomation(
+                id="quick-instance",
+                owner="alice",
+                name="Quick clients",
+                enabled=True,
+                email_account_id="account-1",
+                config_json=__import__("json").dumps(quick.to_dict()),
+            ),
+            EmailResearchAutomation(
+                id="deep-instance",
+                owner="alice",
+                name="Deep clients",
+                enabled=True,
+                email_account_id="account-1",
+                config_json=__import__("json").dumps(deep.to_dict()),
+            ),
+        ]
+    )
+    db.commit()
+    db.close()
+
+    mail = FakeMail(
+        [
+            (
+                "1",
+                raw_mail(
+                    message_id="<quick@example.com>",
+                    sender="first@example.com",
+                ),
+            ),
+            (
+                "2",
+                raw_mail(
+                    message_id="<deep@example.com>",
+                    sender="second@example.com",
+                ),
+            ),
+        ]
+    )
+    research = FakeResearch()
+    worker = er.EmailResearchWorker(research, mail_transport=mail)
+
+    result = run(worker.run_cycle())
+
+    assert result["instances_polled"] == 2
+    assert result["accepted"] == 2
+    jobs = {job.automation_id: job for job in all_jobs(Session)}
+    assert set(jobs) == {"quick-instance", "deep-instance"}
+    assert jobs["quick-instance"].research_max_rounds == 2
+    assert jobs["quick-instance"].research_max_sources == 12
+    assert jobs["quick-instance"].research_timeout_seconds == 600
+    assert jobs["deep-instance"].research_max_rounds == 5
+    assert jobs["deep-instance"].research_max_sources == 60
+    assert jobs["deep-instance"].research_timeout_seconds == 5400
+    assert len(mail.sent) == 2
+    assert len(research.starts) == 2
+
+    dashboard = worker.dashboard("alice")
+    by_id = {item["id"]: item for item in dashboard["instances"]}
+    assert by_id["quick-instance"]["status"]["next_inbox_poll"]
+    assert by_id["deep-instance"]["status"]["next_inbox_poll"]
 
 
 @pytest.mark.parametrize(

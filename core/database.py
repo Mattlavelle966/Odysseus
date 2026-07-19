@@ -444,6 +444,30 @@ class EmailAccount(TimestampMixin, Base):
     )
 
 
+class EmailResearchAutomation(TimestampMixin, Base):
+    """Named, independently scheduled email-to-research configuration."""
+    __tablename__ = "email_research_automations"
+
+    id = Column(String, primary_key=True)
+    owner = Column(String, nullable=False, index=True)
+    name = Column(String, nullable=False)
+    enabled = Column(Boolean, default=False, nullable=False, index=True)
+    email_account_id = Column(
+        String, ForeignKey("email_accounts.id"), nullable=False, index=True
+    )
+    config_json = Column(Text, nullable=False, default="{}")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "owner", "name", name="uq_email_research_automation_owner_name"
+        ),
+        Index(
+            "ix_email_research_automation_owner_enabled",
+            "owner", "enabled",
+        ),
+    )
+
+
 class EmailResearchJob(TimestampMixin, Base):
     """Durable email-to-Deep-Research workflow state.
 
@@ -456,6 +480,13 @@ class EmailResearchJob(TimestampMixin, Base):
 
     id = Column(String, primary_key=True)
     owner = Column(String, nullable=False, index=True)
+    automation_id = Column(
+        String,
+        ForeignKey("email_research_automations.id"),
+        nullable=True,
+        index=True,
+    )
+    config_snapshot_json = Column(Text, nullable=True)
     email_account_id = Column(String, ForeignKey("email_accounts.id"), nullable=False, index=True)
     provider_message_identifier = Column(String, nullable=False)
     rfc_message_id = Column(String, nullable=False)
@@ -1242,6 +1273,8 @@ def _migrate_email_research_columns():
             ).fetchall()
         }
         additions = {
+            "automation_id": "VARCHAR",
+            "config_snapshot_json": "TEXT",
             "sanitized_html_body": "TEXT NOT NULL DEFAULT ''",
             "research_depth_preset": "VARCHAR NOT NULL DEFAULT 'standard'",
             "research_max_rounds": "INTEGER NOT NULL DEFAULT 3",
@@ -1262,6 +1295,10 @@ def _migrate_email_research_columns():
                 )
                 columns.add(name)
         if columns:
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_email_research_jobs_automation_id "
+                "ON email_research_jobs (automation_id)"
+            )
             conn.commit()
     except Exception as exc:
         logger.warning("email research column migration failed: %s", exc)

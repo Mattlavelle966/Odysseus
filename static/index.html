@@ -876,6 +876,18 @@
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0;opacity:0.5;"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>
           <span class="grow">Deep Research</span>
         </div>
+        <div class="list-item admin-only" id="tool-email-research-worker-btn">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+            stroke="currentColor" stroke-width="2" stroke-linecap="round"
+            stroke-linejoin="round" style="flex-shrink:0;opacity:0.5;">
+            <rect x="2" y="5" width="20" height="14" rx="2"/>
+            <path d="m2 7 10 6 10-6"/>
+            <path d="M18 2v5M15.5 4.5h5"/>
+          </svg>
+          <span class="grow">Deep Research Email Worker</span>
+          <span id="email-research-worker-live-dot" class="sidebar-notif-dot"
+            style="display:none"></span>
+        </div>
         <div class="list-item" id="tool-gallery-btn">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
             stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
@@ -1986,51 +1998,6 @@
             <div class="settings-row" style="align-items:center;">
               <div class="admin-toggle-sub" style="margin:0;flex:1;">Manage email background tasks in Tasks.</div>
               <button class="admin-btn-add" id="set-email-open-tasks" style="display:inline-flex;align-items:center;gap:6px;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="opacity:0.7"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/><path d="M9 16l2 2 4-4"/></svg>Open Tasks</button>
-            </div>
-          </div>
-
-          <div class="admin-card admin-only" id="email-research-settings-card">
-            <h2 style="display:flex;align-items:center;gap:6px;">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 5h20v14H2z"/><path d="m2 7 10 6 10-6"/><path d="M18 2v4M16 4h4"/></svg>
-              Email Research Automation
-              <span style="flex:1"></span>
-              <label class="admin-switch" title="Enable deterministic inbox polling"><input type="checkbox" id="er-enabled"><span class="admin-slider"></span></label>
-            </h2>
-            <div class="admin-toggle-sub" style="margin-bottom:10px;">Turn approved inbound messages into durable Deep Research jobs. Mail credentials remain in Email Accounts.</div>
-            <div class="settings-col">
-              <div class="settings-row"><label class="settings-label">Email account</label><select id="er-account" class="settings-select" style="flex:1"><option value="">Select an account…</option></select></div>
-              <div class="settings-row"><label class="settings-label">Model endpoint</label><select id="er-endpoint" class="settings-select" style="flex:1"><option value="">Default endpoint</option></select></div>
-              <div class="settings-row"><label class="settings-label">Research model</label><input id="er-model" class="settings-input" placeholder="Default Deep Research model"></div>
-              <div class="settings-row"><label class="settings-label">Research depth</label><select id="er-depth-preset" class="settings-select" style="flex:1"><option value="quick">Quick — 2 rounds · 12 sources · 10 min</option><option value="standard">Standard — 3 rounds · 30 sources · 30 min</option><option value="deep">Deep — 5 rounds · 60 sources · 90 min</option><option value="custom">Custom</option></select></div>
-              <div class="settings-row" id="er-custom-depth-row"><label class="settings-label">Custom depth</label><input id="er-rounds" class="settings-input" type="number" min="1" max="20" title="Maximum rounds"><input id="er-source-limit" class="settings-input" type="number" min="1" max="500" title="Maximum sources"><input id="er-timeout" class="settings-input" type="number" min="60" max="86400" title="Maximum time, seconds"></div>
-              <div class="settings-row"><label class="settings-label">Early stopping</label><label style="font-size:11px;display:flex;align-items:center;gap:6px"><input id="er-early-stop" type="checkbox"> Stop when a completed round finds no useful new information</label></div>
-              <div class="settings-row"><label class="settings-label">Polling / concurrency</label><input id="er-poll" class="settings-input" type="number" min="15" title="Polling interval in seconds"><input id="er-concurrency" class="settings-input" type="number" min="1" title="Maximum simultaneous jobs"></div>
-              <div class="settings-row"><label class="settings-label">Required subject prefix</label><input id="er-prefix" class="settings-input" placeholder="Optional, e.g. Research:"></div>
-              <div class="settings-row"><label class="settings-label">Allowed addresses</label><textarea id="er-allowed-addresses" class="settings-select" rows="2" style="flex:1;resize:vertical" placeholder="client@example.com, peer@example.org"></textarea></div>
-              <div class="settings-row"><label class="settings-label">Allowed domains</label><textarea id="er-allowed-domains" class="settings-select" rows="2" style="flex:1;resize:vertical" placeholder="example.com, trusted.org"></textarea></div>
-              <div class="settings-row"><label class="settings-label">Blocked patterns</label><textarea id="er-blocked" class="settings-select" rows="2" style="flex:1;resize:vertical" placeholder="no-reply, newsletter"></textarea></div>
-              <div class="settings-row"><label class="settings-label">Request / attachment limits</label><input id="er-max-request" class="settings-input" type="number" min="100" title="Maximum request characters"><input id="er-max-attachment" class="settings-input" type="number" min="0" title="Maximum attachment bytes"></div>
-              <div class="settings-row"><label class="settings-label">Daily limits</label><input id="er-sender-day" class="settings-input" type="number" min="1" title="Per sender"><input id="er-total-day" class="settings-input" type="number" min="1" title="Total jobs"></div>
-              <div class="settings-row"><label class="settings-label">Delivery / retry</label><input id="er-html-threshold" class="settings-input" type="number" min="1000" title="Attachment threshold, bytes"><input id="er-retry-limit" class="settings-input" type="number" min="0" title="Retry limit"></div>
-              <div class="settings-row"><label class="settings-label">Acknowledgement</label><textarea id="er-ack-template" class="settings-select" rows="3" style="flex:1;resize:vertical"></textarea></div>
-              <div class="settings-row"><label class="settings-label">Final reply</label><textarea id="er-final-template" class="settings-select" rows="3" style="flex:1;resize:vertical"></textarea></div>
-              <div class="settings-row"><label class="settings-label">Attachments</label><label style="font-size:11px;display:flex;align-items:center;gap:6px"><input id="er-plain-attachments" type="checkbox"> Allow plain-text attachments</label></div>
-              <div class="settings-row" style="justify-content:flex-end;gap:7px">
-                <span id="er-settings-msg" style="font-size:11px;margin-right:auto"></span>
-                <button class="admin-btn-sm" id="er-disable">Disable</button>
-                <button class="admin-btn-add" id="er-save">Save automation</button>
-              </div>
-            </div>
-          </div>
-
-          <div class="admin-card admin-only" id="email-research-activity-card">
-            <h2 style="display:flex;align-items:center;gap:6px;">Research worker <span id="er-worker-status" style="font-size:10px;font-weight:normal;opacity:.7"></span><span style="flex:1"></span><button class="admin-btn-sm" id="er-test-ack">Test acknowledgement</button><button class="admin-btn-sm" id="er-test-lifecycle">Mock lifecycle</button><button class="admin-btn-add" id="er-run-now">Run now</button></h2>
-            <div id="er-job-counts" style="font-size:11px;opacity:.72;margin:8px 0"></div>
-            <div style="overflow:auto;max-height:330px">
-              <table style="width:100%;border-collapse:collapse;font-size:10px">
-                <thead><tr style="text-align:left;opacity:.6"><th>State</th><th>Sender / subject</th><th>Updated</th><th>Progress / error</th><th></th></tr></thead>
-                <tbody id="er-jobs-body"><tr><td colspan="5" style="padding:12px;opacity:.5">No jobs loaded</td></tr></tbody>
-              </table>
             </div>
           </div>
 

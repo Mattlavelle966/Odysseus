@@ -27,6 +27,7 @@ import calendarModule from './js/calendar.js';
 import notesModule from './js/notes.js';
 import adminModule from './js/admin.js';
 import settingsModule from './js/settings.js';
+import emailResearchWorkerModule from './js/emailResearchWorker.js';
 // Eagerly bind unified minimize/restore behavior across all tool modals.
 import './js/modalManager.js';
 // Desktop window tiling — drag a modal near an edge/corner to snap.
@@ -1009,6 +1010,16 @@ function initializeEventListeners() {
   if (toolResearchBtn) {
     toolResearchBtn.addEventListener('click', () => {
       researchPanelModule.toggle();
+    });
+  }
+
+  const toolEmailResearchWorkerBtn = el('tool-email-research-worker-btn');
+  if (toolEmailResearchWorkerBtn) {
+    toolEmailResearchWorkerBtn.addEventListener('click', async () => {
+      const Modals = await import('./js/modalManager.js');
+      if (!Modals.toggle('email-research-worker-modal')) {
+        emailResearchWorkerModule.open();
+      }
     });
   }
 

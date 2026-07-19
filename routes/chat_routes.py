@@ -1383,6 +1383,7 @@ def setup_chat_routes(
                 _answered_by = None  # set if the selected model failed and a fallback answered
                 _requested_model = sess.model
                 _actual_model = None
+                _agent_response_saved = False
                 try:
                     from src.settings import get_setting
                     from src.agent_tools import MAX_AGENT_ROUNDS as _DEFAULT_ROUNDS
@@ -1505,6 +1506,7 @@ def setup_chat_routes(
                                     used_memories=ctx.used_memories,
                                     incognito=incognito,
                                 )
+                                _agent_response_saved = True
                                 if _saved_id:
                                     yield f'data: {json.dumps({"type": "message_saved", "id": _saved_id})}\n\n'
                                 run_post_response_tasks(
@@ -1545,6 +1547,58 @@ def setup_chat_routes(
                     except Exception:
                         logger.exception("Failed to save partial response on disconnect (session %s)", session)
                     raise
+                except Exception as e:
+                    # Ornith can finish a valid text-only response without any
+                    # tool_calls. If profile-specific parsing/finalization ever
+                    # fails after text has streamed, keep that completed text
+                    # visible and persist it rather than allowing agent_runs to
+                    # replace the bubble with a generic Error 500 event.
+                    from src.model_profiles import get_model_profile
+                    _profile = get_model_profile(
+                        _requested_model,
+                        endpoint_url=getattr(sess, "endpoint_url", ""),
+                    )
+                    if _profile.name != "ornith" or not full_response:
+                        raise
+
+                    logger.exception(
+                        "Ornith interactive finalization failed after %d streamed chars; preserving response",
+                        len(full_response),
+                    )
+                    _saved_id = None
+                    if not _agent_response_saved:
+                        _metrics_to_save = dict(last_metrics or {})
+                        _metrics_to_save.update({
+                            "model": _actual_model or _answered_by or _requested_model,
+                            "requested_model": _requested_model,
+                            "finalization_recovered": True,
+                            "finalization_error_type": type(e).__name__,
+                        })
+                        if thinking_response.strip() and not _metrics_to_save.get("thinking"):
+                            _metrics_to_save["thinking"] = thinking_response.strip()
+                        try:
+                            _saved_id = save_assistant_response(
+                                sess,
+                                session_manager,
+                                session,
+                                full_response,
+                                _metrics_to_save,
+                                character_name=ctx.preset.character_name,
+                                web_sources=web_sources,
+                                rag_sources=ctx.rag_sources,
+                                used_memories=ctx.used_memories,
+                                incognito=incognito,
+                            )
+                            _agent_response_saved = True
+                        except Exception:
+                            logger.exception(
+                                "Failed to persist recovered Ornith response for session %s",
+                                session,
+                            )
+                    if _saved_id:
+                        yield f'data: {json.dumps({"type": "message_saved", "id": _saved_id})}\n\n'
+                    _stream_set(session, status="done")
+                    yield "data: [DONE]\n\n"
                 finally:
                     _active_streams.pop(session, None)
 

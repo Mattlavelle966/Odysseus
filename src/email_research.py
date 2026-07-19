@@ -33,6 +33,7 @@ from sqlalchemy.exc import IntegrityError
 
 from core.database import (
     EmailAccount,
+    EmailResearchAutomation,
     EmailResearchJob,
     ModelEndpoint,
     SessionLocal,
@@ -592,8 +593,8 @@ class EmailResearchConfig:
     server_research_instruction: str = ""
 
     @classmethod
-    def load(cls) -> "EmailResearchConfig":
-        raw = get_setting("email_research_automation", {}) or {}
+    def from_raw(cls, raw: Optional[dict]) -> "EmailResearchConfig":
+        raw = raw if isinstance(raw, dict) else {}
         defaults = cls()
 
         def integer(key: str, minimum: int, maximum: int) -> int:
@@ -671,6 +672,24 @@ class EmailResearchConfig:
                 or defaults.server_research_instruction
             )[:20000],
         )
+
+    @classmethod
+    def load(cls) -> "EmailResearchConfig":
+        return cls.from_raw(get_setting("email_research_automation", {}) or {})
+
+    def to_dict(self) -> dict:
+        return {
+            key: list(value) if isinstance(value, tuple) else value
+            for key, value in self.__dict__.items()
+        }
+
+
+@dataclass(frozen=True)
+class EmailResearchInstance:
+    id: Optional[str]
+    owner: str
+    name: str
+    config: EmailResearchConfig
 
 
 @dataclass
@@ -1029,6 +1048,8 @@ class EmailResearchWorker:
         self._wake = asyncio.Event()
         self._stop = asyncio.Event()
         self._task: Optional[asyncio.Task] = None
+        self._instance_status: dict[str, dict] = {}
+        self._next_due: dict[str, datetime] = {}
         self.status = {
             "running": False,
             "worker_id": self.worker_id,
@@ -1042,6 +1063,7 @@ class EmailResearchWorker:
     async def start(self) -> None:
         if self._task and not self._task.done():
             return
+        await asyncio.to_thread(self.migrate_legacy_settings)
         self._stop.clear()
         self._task = asyncio.create_task(
             self._loop(), name="email-research-worker"
@@ -1059,15 +1081,16 @@ class EmailResearchWorker:
 
     async def _loop(self) -> None:
         while not self._stop.is_set():
-            config = EmailResearchConfig.load()
             try:
-                # Disabling automation stops new inbox intake, but durable jobs
-                # that were already accepted must still be polled and delivered.
                 await self.run_cycle()
                 self.status["poll_attempt_count"] = 0
             except Exception as exc:
+                configs = self.list_instances()
+                retry_limit = max(
+                    [instance.config.retry_limit for instance in configs] or [5]
+                )
                 self.status["poll_attempt_count"] = min(
-                    config.retry_limit + 1,
+                    retry_limit + 1,
                     int(self.status.get("poll_attempt_count") or 0) + 1,
                 )
                 self.status["last_error"] = type(exc).__name__
@@ -1076,101 +1099,309 @@ class EmailResearchWorker:
                     "attempt_count": self.status["poll_attempt_count"],
                     "error_category": type(exc).__name__,
                 }))
-            failures = int(self.status.get("poll_attempt_count") or 0)
-            interval = min(
-                3600,
-                config.polling_interval_seconds * (2 ** max(0, failures - 1)),
-            )
-            self.status["next_inbox_poll"] = (
-                _utcnow() + timedelta(seconds=interval)
-            ).isoformat() + "Z"
+            interval = self._seconds_until_next_poll()
             self._wake.clear()
             try:
                 await asyncio.wait_for(self._wake.wait(), timeout=interval)
             except asyncio.TimeoutError:
                 pass
 
-    async def run_now(self) -> dict:
+    async def run_now(self, automation_id: Optional[str] = None) -> dict:
         self._wake.set()
         if self._cycle_lock.locked():
             return {"result": "no-op", "reason": "worker_cycle_already_running"}
-        return await self.run_cycle(force=True)
+        return await self.run_cycle(force=True, automation_id=automation_id)
 
-    async def run_cycle(self, force: bool = False) -> dict:
+    async def run_cycle(
+        self,
+        force: bool = False,
+        automation_id: Optional[str] = None,
+    ) -> dict:
         async with self._cycle_lock:
             started = time.monotonic()
             self.status["running"] = True
-            config = EmailResearchConfig.load()
             try:
-                if not config.enabled and not force:
-                    progressed = await self._advance_due(config)
-                    result = {
-                        "result": "success" if progressed else "no-op",
-                        "reason": "automation_disabled_intake",
-                        "jobs_progressed": progressed,
-                        "duration_ms": round(
-                            (time.monotonic() - started) * 1000
-                        ),
-                    }
-                    self.status["last_cycle_result"] = result
-                    self.status["last_error"] = None
-                    _log_event(
-                        logging.INFO,
-                        "email_research_cycle_complete",
-                        account_id=config.email_account_id,
-                        accepted=0,
-                        rejected=0,
-                        jobs_progressed=progressed,
-                        intake_enabled=False,
-                        duration_ms=result["duration_ms"],
+                instances = self.list_instances()
+                if automation_id:
+                    instances = [
+                        instance
+                        for instance in instances
+                        if instance.id == automation_id
+                    ]
+                    if not instances:
+                        return {
+                            "result": "rejected",
+                            "reason": "automation_not_found",
+                        }
+
+                now = _utcnow()
+                due = [
+                    instance
+                    for instance in instances
+                    if (instance.config.enabled or force)
+                    and (
+                        force
+                        or self._next_due.get(self._instance_key(instance)) is None
+                        or self._next_due[self._instance_key(instance)] <= now
                     )
-                    return result
-                if not config.email_account_id:
-                    result = {"result": "rejected", "reason": "email_account_not_selected"}
-                    self.status["last_cycle_result"] = result
-                    return result
-                account = self._account(config.email_account_id)
-                if not account:
-                    result = {"result": "rejected", "reason": "email_account_unavailable"}
-                    self.status["last_cycle_result"] = result
-                    return result
+                ]
+                accepted = rejected = ignored = progressed = 0
+                by_account: dict[str, list[EmailResearchInstance]] = {}
+                due_accounts = {
+                    instance.config.email_account_id for instance in due
+                }
+                # A mailbox is fetched once. Evaluate every enabled instance
+                # on that mailbox during the fetch so a message rejected by
+                # one sender policy can still route to another matching one.
+                for instance in instances:
+                    if (
+                        (instance.config.enabled or force)
+                        and instance.config.email_account_id in due_accounts
+                    ):
+                        by_account.setdefault(
+                            instance.config.email_account_id, []
+                        ).append(instance)
 
-                rows = await asyncio.to_thread(
-                    self.mail.fetch_recent,
-                    account.id,
-                    account.owner or "",
-                )
-                self.status["last_inbox_poll"] = _utcnow().isoformat() + "Z"
-                accepted = rejected = ignored = 0
-                for provider_id, raw in rows:
-                    outcome = self._ingest(account, provider_id, raw, config)
-                    accepted += outcome == "accepted"
-                    rejected += outcome == "rejected"
-                    ignored += outcome in {"ignored", "duplicate"}
+                for account_id, account_instances in by_account.items():
+                    outcome = await self._poll_account(
+                        account_id, account_instances
+                    )
+                    accepted += outcome["accepted"]
+                    rejected += outcome["rejected"]
+                    ignored += outcome["ignored_or_duplicate"]
 
-                progressed = await self._advance_due(config)
+                for instance in instances:
+                    progressed += await self._advance_due(
+                        instance.config, instance.id
+                    )
+                if instances and all(
+                    instance.id is not None for instance in instances
+                ):
+                    # Jobs accepted before the multi-instance migration retain
+                    # a NULL automation id and finish with their legacy snapshot.
+                    progressed += await self._advance_due(
+                        EmailResearchConfig.load(), None
+                    )
+
                 result = {
-                    "result": "success",
+                    "result": (
+                        "success"
+                        if due or progressed
+                        else "no-op"
+                    ),
                     "accepted": accepted,
                     "rejected": rejected,
                     "ignored_or_duplicate": ignored,
                     "jobs_progressed": progressed,
+                    "instances_polled": len(due),
                     "duration_ms": round((time.monotonic() - started) * 1000),
                 }
                 self.status["last_cycle_result"] = result
                 self.status["last_error"] = None
+                self._sync_global_poll_status()
                 _log_event(
                     logging.INFO,
                     "email_research_cycle_complete",
-                    account_id=account.id,
+                    account_id=None,
                     accepted=accepted,
                     rejected=rejected,
                     jobs_progressed=progressed,
+                    instances_polled=len(due),
                     duration_ms=result["duration_ms"],
                 )
                 return result
             finally:
                 self.status["running"] = False
+
+    @staticmethod
+    def _instance_key(instance: EmailResearchInstance) -> str:
+        return instance.id or "legacy"
+
+    def _seconds_until_next_poll(self) -> float:
+        now = _utcnow()
+        enabled_due = [
+            value for value in self._next_due.values() if value is not None
+        ]
+        if not enabled_due:
+            return 60.0
+        return max(1.0, min(60.0, (min(enabled_due) - now).total_seconds()))
+
+    def _sync_global_poll_status(self) -> None:
+        polls = [
+            status.get("last_inbox_poll")
+            for status in self._instance_status.values()
+            if status.get("last_inbox_poll")
+        ]
+        next_polls = [
+            status.get("next_inbox_poll")
+            for status in self._instance_status.values()
+            if status.get("next_inbox_poll")
+        ]
+        self.status["last_inbox_poll"] = max(polls) if polls else None
+        self.status["next_inbox_poll"] = min(next_polls) if next_polls else None
+
+    def migrate_legacy_settings(self) -> Optional[str]:
+        """Create one named DB instance from the former singleton setting."""
+        db = SessionLocal()
+        try:
+            if db.query(EmailResearchAutomation.id).first():
+                return None
+            config = EmailResearchConfig.load()
+            if not config.email_account_id:
+                return None
+            account = db.get(EmailAccount, config.email_account_id)
+            if not account:
+                return None
+            row = EmailResearchAutomation(
+                id=uuid.uuid4().hex,
+                owner=account.owner or "",
+                name="Default Email Research",
+                enabled=config.enabled,
+                email_account_id=config.email_account_id,
+                config_json=json.dumps(config.to_dict()),
+            )
+            db.add(row)
+            db.commit()
+            return row.id
+        finally:
+            db.close()
+
+    def list_instances(self, owner: Optional[str] = None) -> list[EmailResearchInstance]:
+        db = SessionLocal()
+        try:
+            query = db.query(EmailResearchAutomation)
+            if owner is not None:
+                query = query.filter(EmailResearchAutomation.owner == owner)
+            rows = query.order_by(
+                EmailResearchAutomation.created_at.asc(),
+                EmailResearchAutomation.id.asc(),
+            ).all()
+            if rows:
+                return [
+                    EmailResearchInstance(
+                        id=row.id,
+                        owner=row.owner,
+                        name=row.name,
+                        config=EmailResearchConfig.from_raw(
+                            {
+                                **json.loads(row.config_json or "{}"),
+                                "enabled": row.enabled,
+                                "email_account_id": row.email_account_id,
+                            }
+                        ),
+                    )
+                    for row in rows
+                ]
+        finally:
+            db.close()
+        # Test/development compatibility before the startup migration executes.
+        config = EmailResearchConfig.load()
+        return [
+            EmailResearchInstance(
+                id=None, owner=owner or "", name="Legacy automation", config=config
+            )
+        ]
+
+    async def _poll_account(
+        self,
+        account_id: str,
+        instances: list[EmailResearchInstance],
+    ) -> dict:
+        account = self._account(account_id)
+        if not account:
+            for instance in instances:
+                self._set_instance_error(instance, "email_account_unavailable")
+            return {
+                "accepted": 0,
+                "rejected": len(instances),
+                "ignored_or_duplicate": 0,
+            }
+        for instance in instances:
+            key = self._instance_key(instance)
+            current = self._instance_status.get(key, {})
+            self._instance_status[key] = {
+                **current,
+                "running": True,
+                "last_error": None,
+            }
+        try:
+            rows = await asyncio.to_thread(
+                self.mail.fetch_recent, account.id, account.owner or ""
+            )
+        except Exception as exc:
+            for instance in instances:
+                self._set_instance_error(instance, type(exc).__name__)
+            raise
+        accepted = rejected = ignored = 0
+        for provider_id, raw in rows:
+            accepted_match = None
+            rejected_match = None
+            ignored_only = True
+            for instance in instances:
+                inbound = parse_inbound(provider_id, raw, instance.config)
+                reason = rejection_reason(
+                    inbound, instance.config, account.from_address
+                )
+                if reason is None:
+                    accepted_match = (instance, inbound, None)
+                    break
+                if reason[1] and rejected_match is None:
+                    rejected_match = (instance, inbound, reason)
+                    ignored_only = False
+            selected = accepted_match or rejected_match
+            if selected:
+                instance, inbound, reason = selected
+                outcome = self._ingest(
+                    account,
+                    provider_id,
+                    raw,
+                    instance.config,
+                    automation_id=instance.id,
+                    inbound=inbound,
+                    evaluated_rejection=reason,
+                    policy_evaluated=True,
+                )
+                accepted += outcome == "accepted"
+                rejected += outcome == "rejected"
+                ignored += outcome in {"ignored", "duplicate"}
+            elif ignored_only:
+                ignored += 1
+
+        polled_at = _utcnow()
+        for instance in instances:
+            key = self._instance_key(instance)
+            next_at = polled_at + timedelta(
+                seconds=instance.config.polling_interval_seconds
+            )
+            self._next_due[key] = next_at
+            self._instance_status[key] = {
+                "running": False,
+                "last_inbox_poll": polled_at.isoformat() + "Z",
+                "next_inbox_poll": next_at.isoformat() + "Z",
+                "last_error": None,
+            }
+        return {
+            "accepted": accepted,
+            "rejected": rejected,
+            "ignored_or_duplicate": ignored,
+        }
+
+    def _set_instance_error(
+        self, instance: EmailResearchInstance, error: str
+    ) -> None:
+        key = self._instance_key(instance)
+        next_at = _utcnow() + timedelta(
+            seconds=instance.config.polling_interval_seconds
+        )
+        self._next_due[key] = next_at
+        self._instance_status[key] = {
+            "running": False,
+            "last_inbox_poll": self._instance_status.get(key, {}).get(
+                "last_inbox_poll"
+            ),
+            "next_inbox_poll": next_at.isoformat() + "Z",
+            "last_error": error,
+        }
 
     def _account(self, account_id: str) -> Optional[EmailAccount]:
         db = SessionLocal()
@@ -1189,9 +1420,18 @@ class EmailResearchWorker:
         provider_id: str,
         raw: bytes,
         config: EmailResearchConfig,
+        *,
+        automation_id: Optional[str] = None,
+        inbound: Optional[InboundResearchMessage] = None,
+        evaluated_rejection: Optional[tuple[str, bool]] = None,
+        policy_evaluated: bool = False,
     ) -> str:
-        inbound = parse_inbound(provider_id, raw, config)
-        reject = rejection_reason(inbound, config, account.from_address)
+        inbound = inbound or parse_inbound(provider_id, raw, config)
+        reject = (
+            evaluated_rejection
+            if policy_evaluated
+            else rejection_reason(inbound, config, account.from_address)
+        )
         if reject and not reject[1]:
             return "ignored"
 
@@ -1206,13 +1446,19 @@ class EmailResearchWorker:
                 return "duplicate"
 
             reason = reject[0] if reject else self._rate_limit_reason(
-                db, account.owner or "", inbound.sender, config
+                db,
+                account.owner or "",
+                inbound.sender,
+                config,
+                automation_id,
             )
             state = "rejected" if reason else "received"
             job_id = uuid.uuid4().hex
             job = EmailResearchJob(
                 id=job_id,
                 owner=account.owner or "",
+                automation_id=automation_id,
+                config_snapshot_json=json.dumps(config.to_dict()),
                 email_account_id=account.id,
                 provider_message_identifier=provider_id,
                 rfc_message_id=inbound.message_id,
@@ -1269,34 +1515,62 @@ class EmailResearchWorker:
 
     @staticmethod
     def _rate_limit_reason(
-        db, owner: str, sender: str, config: EmailResearchConfig
+        db,
+        owner: str,
+        sender: str,
+        config: EmailResearchConfig,
+        automation_id: Optional[str] = None,
     ) -> Optional[str]:
         since = _utcnow() - timedelta(days=1)
-        total = db.query(EmailResearchJob.id).filter(
+        total_query = db.query(EmailResearchJob.id).filter(
             EmailResearchJob.owner == owner,
             EmailResearchJob.received_at >= since,
-        ).count()
-        if total >= config.maximum_total_jobs_per_day:
-            return "daily_job_limit"
-        sender_total = db.query(EmailResearchJob.id).filter(
+        )
+        sender_query = db.query(EmailResearchJob.id).filter(
             EmailResearchJob.owner == owner,
             EmailResearchJob.sender_address == sender,
             EmailResearchJob.received_at >= since,
-        ).count()
+        )
+        if automation_id is not None:
+            total_query = total_query.filter(
+                EmailResearchJob.automation_id == automation_id
+            )
+            sender_query = sender_query.filter(
+                EmailResearchJob.automation_id == automation_id
+            )
+        total = total_query.count()
+        if total >= config.maximum_total_jobs_per_day:
+            return "daily_job_limit"
+        sender_total = sender_query.count()
         if sender_total >= config.maximum_requests_per_sender_per_day:
             return "sender_daily_limit"
         return None
 
-    async def _advance_due(self, config: EmailResearchConfig) -> int:
-        active = self._active_research_count()
+    async def _advance_due(
+        self,
+        config: EmailResearchConfig,
+        automation_id: Optional[str] = None,
+    ) -> int:
+        active = self._active_research_count(automation_id)
         capacity = max(0, config.maximum_simultaneous_jobs - active)
         limit = max(10, capacity + 5)
-        claimed = self._claim_due(limit)
+        claimed = self._claim_due(limit, automation_id)
         progressed = 0
         for job_id in claimed:
             try:
+                job = self._load_job(job_id)
+                job_config = config
+                if job and job.config_snapshot_json:
+                    try:
+                        job_config = EmailResearchConfig.from_raw(
+                            json.loads(job.config_snapshot_json)
+                        )
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        job_config = config
                 did_progress, started_research = await self._advance_job(
-                    job_id, config, allow_research_start=capacity > 0
+                    job_id,
+                    job_config,
+                    allow_research_start=capacity > 0,
                 )
                 progressed += int(did_progress)
                 if started_research:
@@ -1305,16 +1579,27 @@ class EmailResearchWorker:
                 self._release(job_id)
         return progressed
 
-    def _active_research_count(self) -> int:
+    def _active_research_count(
+        self, automation_id: Optional[str] = None
+    ) -> int:
         db = SessionLocal()
         try:
-            return db.query(EmailResearchJob.id).filter(
+            query = db.query(EmailResearchJob.id).filter(
                 EmailResearchJob.state == "researching"
-            ).count()
+            )
+            if automation_id is None:
+                query = query.filter(EmailResearchJob.automation_id.is_(None))
+            else:
+                query = query.filter(
+                    EmailResearchJob.automation_id == automation_id
+                )
+            return query.count()
         finally:
             db.close()
 
-    def _claim_due(self, limit: int) -> list[str]:
+    def _claim_due(
+        self, limit: int, automation_id: Optional[str] = None
+    ) -> list[str]:
         now = _utcnow()
         lease_until = now + timedelta(minutes=5)
         db = SessionLocal()
@@ -1322,6 +1607,11 @@ class EmailResearchWorker:
         try:
             rows = db.query(EmailResearchJob.id).filter(
                 ~EmailResearchJob.state.in_(TERMINAL_STATES),
+                (
+                    EmailResearchJob.automation_id.is_(None)
+                    if automation_id is None
+                    else EmailResearchJob.automation_id == automation_id
+                ),
                 (EmailResearchJob.next_retry_at.is_(None))
                 | (EmailResearchJob.next_retry_at <= now),
                 (EmailResearchJob.lease_until.is_(None))
@@ -1917,15 +2207,32 @@ class EmailResearchWorker:
         finally:
             db.close()
 
-    def dashboard(self, owner: str, limit: int = 100) -> dict:
+    def dashboard(
+        self,
+        owner: str,
+        limit: int = 100,
+        automation_id: Optional[str] = None,
+    ) -> dict:
         db = SessionLocal()
         try:
-            rows = db.query(EmailResearchJob).filter(
+            jobs_query = db.query(EmailResearchJob).filter(
                 EmailResearchJob.owner == owner
-            ).order_by(EmailResearchJob.created_at.desc()).limit(limit).all()
+            )
+            if automation_id:
+                jobs_query = jobs_query.filter(
+                    EmailResearchJob.automation_id == automation_id
+                )
+            rows = jobs_query.order_by(
+                EmailResearchJob.created_at.desc()
+            ).limit(limit).all()
             counts = {
                 state: db.query(EmailResearchJob.id).filter(
                     EmailResearchJob.owner == owner,
+                    *(
+                        [EmailResearchJob.automation_id == automation_id]
+                        if automation_id
+                        else []
+                    ),
                     EmailResearchJob.state == state,
                 ).count()
                 for state in (
@@ -1934,6 +2241,11 @@ class EmailResearchWorker:
             }
             counts["active"] = db.query(EmailResearchJob.id).filter(
                 EmailResearchJob.owner == owner,
+                *(
+                    [EmailResearchJob.automation_id == automation_id]
+                    if automation_id
+                    else []
+                ),
                 ~EmailResearchJob.state.in_(TERMINAL_STATES),
             ).count()
             counts["completed"] = counts["delivered"]
@@ -1972,6 +2284,7 @@ class EmailResearchWorker:
                 jobs.append(
                     {
                         "id": row.id,
+                        "automation_id": row.automation_id,
                         "account_id": row.email_account_id,
                         "state": row.state,
                         "result_status": row.result_status,
@@ -1998,8 +2311,46 @@ class EmailResearchWorker:
                         "progress": progress,
                     }
                 )
+            instances = []
+            for instance in self.list_instances(owner):
+                key = self._instance_key(instance)
+                instance_counts = {
+                    "active": db.query(EmailResearchJob.id).filter(
+                        EmailResearchJob.owner == owner,
+                        EmailResearchJob.automation_id == instance.id,
+                        ~EmailResearchJob.state.in_(TERMINAL_STATES),
+                    ).count(),
+                    "delivered": db.query(EmailResearchJob.id).filter(
+                        EmailResearchJob.owner == owner,
+                        EmailResearchJob.automation_id == instance.id,
+                        EmailResearchJob.state == "delivered",
+                    ).count(),
+                }
+                instances.append(
+                    {
+                        "id": instance.id,
+                        "name": instance.name,
+                        "enabled": instance.config.enabled,
+                        "email_account_id": instance.config.email_account_id,
+                        "depth_preset": instance.config.research_depth_preset,
+                        "polling_interval_seconds": (
+                            instance.config.polling_interval_seconds
+                        ),
+                        "status": self._instance_status.get(
+                            key,
+                            {
+                                "running": False,
+                                "last_inbox_poll": None,
+                                "next_inbox_poll": None,
+                                "last_error": None,
+                            },
+                        ),
+                        "counts": instance_counts,
+                    }
+                )
             return {
                 "worker": dict(self.status),
+                "instances": instances,
                 "counts": counts,
                 "jobs": jobs,
             }

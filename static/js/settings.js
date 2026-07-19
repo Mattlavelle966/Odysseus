@@ -2404,7 +2404,6 @@ function initAll() {
   initIntegrations();
   initEmailSettings();
   initEmailAccountsSettings();
-  initEmailResearchAutomation();
   initReminderSettings();
   initUnifiedIntegrations();
 }
