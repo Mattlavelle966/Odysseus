@@ -590,6 +590,14 @@ def setup_chat_routes(
         # actually get bash enabled.
         allow_bash = form_data.get("allow_bash") or (body or {}).get("allow_bash")
         allow_web_search = form_data.get("allow_web_search") or (body or {}).get("allow_web_search")
+        buddy_enabled_raw = form_data.get("buddy_enabled")
+        if buddy_enabled_raw is None:
+            buddy_enabled_raw = (body or {}).get("buddy_enabled")
+        buddy_enabled = str(buddy_enabled_raw or "").lower() == "true"
+        buddy_prompt_raw = form_data.get("buddy_prompt")
+        if buddy_prompt_raw is None:
+            buddy_prompt_raw = (body or {}).get("buddy_prompt", "")
+        buddy_prompt = str(buddy_prompt_raw or "")[:4000]
         use_rag = form_data.get("use_rag")
         search_context = form_data.get("search_context")  # pre-fetched web search results (compare mode)
         compare_mode = str(form_data.get("compare_mode", "")).lower() == "true"
@@ -1432,7 +1440,7 @@ def setup_chat_routes(
                         _max_rounds = int(get_setting("agent_max_rounds", _DEFAULT_ROUNDS) or _DEFAULT_ROUNDS)
                     except (TypeError, ValueError):
                         _max_rounds = _DEFAULT_ROUNDS
-                    _max_rounds = max(1, min(_max_rounds, 200))
+                    _max_rounds = max(1, min(_max_rounds, 1000))
 
                     _forced_tools = None
                     if _search_enabled:
@@ -1461,6 +1469,8 @@ def setup_chat_routes(
                         workspace=workspace or None,
                         forced_tools=_forced_tools,
                         uploaded_files=ctx.uploaded_files,
+                        buddy_enabled=buddy_enabled,
+                        buddy_prompt=buddy_prompt,
                     ):
                         if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
                             try:

@@ -1759,7 +1759,7 @@ async function initAgentSettings() {
 
   async function save() {
     var tools = clampInt(toolsInput.value, 0, 1000, 0);
-    var rounds = roundsInput ? clampInt(roundsInput.value, 1, 200, 20) : null;
+    var rounds = roundsInput ? clampInt(roundsInput.value, 1, 1000, 20) : null;
     toolsInput.value = tools;                       // reflect the clamped value
     if (roundsInput) roundsInput.value = rounds;
     var payload = { agent_max_tool_calls: tools };

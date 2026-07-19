@@ -153,7 +153,7 @@ DEFAULT_SETTINGS = {
     # Ornith private reasoning remains available as reasoning_content for
     # protocol continuity, but is hidden from the UI unless explicitly enabled.
     "ornith_show_reasoning": False,
-    "agent_max_rounds": 20,  # per-message agent step cap (clamped 1..200)
+    "agent_max_rounds": 20,  # per-message agent step cap (clamped 1..1000)
     # Soft input-token budget for the agent loop. The DEFAULT value (6000) is the
     # "auto" sentinel: it means "scale the budget to the model's context window"
     # (#1230) — so long-context models aren't capped at 6000. Set ANY OTHER value

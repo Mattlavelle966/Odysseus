@@ -10,7 +10,7 @@ import modelsModule from './js/models.js';
 import ragModule from './js/rag.js';
 import presetsModule from './js/presets.js';
 import searchModule from './js/search.js';
-import chatModule from './js/chat.js';
+import chatModule from './js/chat.js?v=20260719buddy';
 import compareModule from './js/compare/index.js';
 import documentModule from './js/document.js';
 import searchChatModule from './js/search-chat.js';
@@ -1745,6 +1745,7 @@ function initializeEventListeners() {
   const MODE_TOOLS = [
     { btnId: 'web-toggle-btn',  checkboxId: 'web-toggle',  stateKey: 'web' },
     { btnId: 'bash-toggle-btn', checkboxId: 'bash-toggle', stateKey: 'bash' },
+    { btnId: 'buddy-toggle-btn', checkboxId: 'buddy-toggle', stateKey: 'buddy' },
   ];
 
   function _modeKey(stateKey, mode) { return `${stateKey}_${mode}`; }
@@ -1753,6 +1754,7 @@ function initializeEventListeners() {
     const state = loadToggleState();
     const key = _modeKey(stateKey, mode);
     if (Object.prototype.hasOwnProperty.call(state, key)) return !!state[key];
+    if (stateKey === 'buddy') return false; // Buddy is deliberately opt-in.
     return mode === 'agent'; // default: ON in agent, OFF in chat
   }
 
@@ -1765,6 +1767,7 @@ function initializeEventListeners() {
   const TOOL_TOGGLE_TOAST_LABELS = {
     web: 'Web search',
     bash: 'Shell',
+    buddy: 'Buddy mode',
   };
 
   function showToolToggleToast(stateKey, active) {
@@ -1777,8 +1780,8 @@ function initializeEventListeners() {
     MODE_TOOLS.forEach(({ btnId, checkboxId, stateKey }) => {
       const btn = el(btnId);
       if (!btn) return;
-      // Hide bash button in chat mode
-      if (mode === 'chat' && stateKey === 'bash') {
+      // Agent-only controls stay out of plain Chat mode.
+      if (mode === 'chat' && (stateKey === 'bash' || stateKey === 'buddy')) {
         btn.style.display = 'none';
         return;
       }
@@ -1787,6 +1790,7 @@ function initializeEventListeners() {
       if (btn.style.display === 'none') return;
       const on = loadToolPref(stateKey, mode);
       btn.classList.toggle('active', on);
+      btn.setAttribute('aria-pressed', String(on));
       if (checkboxId) { const chk = el(checkboxId); if (chk) chk.checked = on; }
     });
   }
@@ -1803,6 +1807,8 @@ function initializeEventListeners() {
     if (currentMode === 'chat') {
       const bashBtn = el('bash-toggle-btn');
       if (bashBtn) bashBtn.style.display = 'none';
+      const buddyBtn = el('buddy-toggle-btn');
+      if (buddyBtn) buddyBtn.style.display = 'none';
     }
 
     function setMode(mode) {
@@ -1839,6 +1845,7 @@ function initializeEventListeners() {
   const _toolSplashes = {
     web: { role: 'Web Search', text: 'Searches the web for relevant information to include in the response. Results are fetched and summarized before the AI answers.' },
     bash: { role: 'Shell Access', text: 'Gives the AI access to a sandboxed shell for running commands, installing packages, and executing scripts. Use with caution.' },
+    buddy: { role: 'Buddy Mode', text: 'A fresh-context agent periodically reviews the path and coaches the primary agent before it commits to a final answer.' },
     builder: { role: 'Tool Builder', text: 'Create custom mini-apps and tools the AI can use. Describe what you need and the AI will build a tool you can reuse across conversations.' },
     research: { role: 'Deep Research', text: 'Multi-round web search with source analysis. Takes longer but produces comprehensive, well-sourced answers. Your next message will trigger a deep research cycle.' },
   };
@@ -1895,6 +1902,76 @@ function initializeEventListeners() {
   }
   setupToggle('web-toggle-btn', 'web-toggle', 'web');
   setupToggle('bash-toggle-btn', 'bash-toggle', 'bash');
+
+  // Buddy uses the same per-mode persistence as Search/Shell, but its first
+  // activation opens a compact guide-prompt editor.
+  (function initBuddyToggle() {
+    const btn = el('buddy-toggle-btn');
+    const chk = el('buddy-toggle');
+    const modal = el('buddy-modal');
+    const prompt = el('buddy-guide-prompt');
+    const saveBtn = el('save-buddy-modal');
+    const cancelBtn = el('cancel-buddy-modal');
+    const closeBtn = el('close-buddy-modal');
+    if (!btn || !chk || !modal || !prompt) return;
+
+    let enabledBeforeOpen = false;
+
+    function setBuddyEnabled(active) {
+      const mode = (loadToggleState().mode) || 'chat';
+      chk.checked = !!active;
+      btn.classList.toggle('active', !!active);
+      btn.setAttribute('aria-pressed', String(!!active));
+      btn.title = active
+        ? 'Buddy Mode active — click to disable (turn on again to edit its prompt)'
+        : 'Buddy Mode';
+      saveToolPref('buddy', mode, !!active);
+      showToolToggleToast('buddy', !!active);
+      document.dispatchEvent(new CustomEvent('overflow-state-change'));
+    }
+
+    function openBuddyModal() {
+      const state = loadToggleState();
+      prompt.value = state.buddy_prompt || '';
+      modal.classList.remove('hidden');
+      setTimeout(() => prompt.focus(), 0);
+    }
+
+    const mode = (loadToggleState().mode) || 'chat';
+    const active = loadToolPref('buddy', mode);
+    chk.checked = active;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-pressed', String(active));
+    if (active) btn.title = 'Buddy Mode active — click to disable (turn on again to edit its prompt)';
+
+    btn.addEventListener('click', () => {
+      if (chk.checked) {
+        setBuddyEnabled(false);
+        return;
+      }
+      enabledBeforeOpen = false;
+      setBuddyEnabled(true);
+      _showToolSplash('buddy');
+      openBuddyModal();
+    });
+
+    if (saveBtn) {
+      saveBtn.addEventListener('click', () => {
+        const state = loadToggleState();
+        state.buddy_prompt = prompt.value.trim().slice(0, 4000);
+        saveToggleState(state);
+        if (!chk.checked) setBuddyEnabled(true);
+        modal.classList.add('hidden');
+      });
+    }
+
+    function cancelBuddyEdit() {
+      modal.classList.add('hidden');
+      if (!enabledBeforeOpen) setBuddyEnabled(false);
+    }
+    if (cancelBtn) cancelBtn.addEventListener('click', cancelBuddyEdit);
+    if (closeBtn) closeBtn.addEventListener('click', cancelBuddyEdit);
+  })();
   try { workspaceModule.initWorkspace(); } catch (_) {}
 
   // Document editor toggle (special: uses module panel, not a checkbox)
@@ -2194,7 +2271,7 @@ function initializeEventListeners() {
     if (!inputLeft || !overflowMenu || !overflowWrapper) return;
 
     // Buttons that can be collapsed (in reverse priority — last collapsed first)
-    const collapsibleIds = ['bash-toggle-btn', 'web-toggle-btn'];
+    const collapsibleIds = ['buddy-toggle-btn', 'bash-toggle-btn', 'web-toggle-btn'];
     const collapsibleBtns = collapsibleIds.map(id => el(id)).filter(Boolean);
     // Map of toolbar btn id → overflow mirror element (created dynamically)
     const overflowMirrors = new Map();
@@ -2533,9 +2610,9 @@ function initializeEventListeners() {
         const beforeNobody = Storage.getJSON(Storage.KEYS.TOGGLES, {}) || {};
         if (!beforeNobody.nobody_prev_mode) beforeNobody.nobody_prev_mode = beforeNobody.mode || 'agent';
         Storage.setJSON(Storage.KEYS.TOGGLES, beforeNobody);
-        const _offIds = ['web-toggle', 'bash-toggle', 'research-toggle'];
+        const _offIds = ['web-toggle', 'bash-toggle', 'buddy-toggle', 'research-toggle'];
         _offIds.forEach(id => { const c = el(id); if (c) c.checked = false; });
-        ['web-toggle-btn', 'bash-toggle-btn'].forEach(id => { const b = el(id); if (b) b.classList.remove('active'); });
+        ['web-toggle-btn', 'bash-toggle-btn', 'buddy-toggle-btn'].forEach(id => { const b = el(id); if (b) b.classList.remove('active'); });
         if (typeof window.__odysseusSetChatMode === 'function') {
           window.__odysseusSetChatMode('chat');
         } else {

@@ -219,9 +219,9 @@
       }, { once: true });
     })();
   </script>
-  <link rel="stylesheet" href="/static/style.css?v=20260630mdfontsize">
-  <link rel="modulepreload" href="/static/app.js?v=20260630mdfontsize">
-  <link rel="modulepreload" href="/static/js/chat.js">
+  <link rel="stylesheet" href="/static/style.css?v=20260719buddy">
+  <link rel="modulepreload" href="/static/app.js?v=20260719buddy">
+  <link rel="modulepreload" href="/static/js/chat.js?v=20260719buddy">
   <link rel="modulepreload" href="/static/js/ui.js">
   <link rel="modulepreload" href="/static/js/sessions.js">
   <link rel="modulepreload" href="/static/js/markdown.js">
@@ -1122,6 +1122,12 @@
               <polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>
             </svg>
           </button>
+          <!-- Buddy Mode (fresh-context agent coach) -->
+          <button type="button" class="input-icon-btn" title="Buddy Mode" id="buddy-toggle-btn" data-mode-tool="true" aria-label="Buddy mode" aria-pressed="false">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="8" cy="9" r="3"/><circle cx="17" cy="8" r="2.5"/><path d="M2.5 20a5.5 5.5 0 0 1 11 0"/><path d="M13.5 14.5A4.5 4.5 0 0 1 21.5 17"/>
+            </svg>
+          </button>
           <!-- Workspace indicator (hidden until a folder is set) -->
           <button type="button" class="input-icon-btn tool-indicator" title="Workspace - click to clear" id="workspace-indicator-btn" aria-label="Clear workspace" style="display:none;">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
@@ -1176,8 +1182,29 @@
       <!-- Hidden checkboxes for state -->
       <input type="checkbox" id="web-toggle" style="display:none;">
       <input type="checkbox" id="bash-toggle" style="display:none;">
+      <input type="checkbox" id="buddy-toggle" style="display:none;">
     </div>
     <form id="chat-form" autocomplete="off" action="javascript:void(0);" style="display:none;"></form>
+
+    <!-- Buddy Mode guide prompt -->
+    <div id="buddy-modal" class="modal hidden">
+      <div class="modal-content buddy-modal-content" role="dialog" aria-modal="true" aria-labelledby="buddy-modal-title">
+        <div class="modal-header">
+          <h4 id="buddy-modal-title">Buddy Mode</h4>
+          <button type="button" class="close-btn" id="close-buddy-modal" aria-label="Close Buddy Mode">✖</button>
+        </div>
+        <div class="modal-body">
+          <p class="buddy-modal-copy">A fresh, tool-free agent checks the path every 10–20 agent rounds and once before the final answer. Give it a private coaching prompt, or use the default.</p>
+          <label for="buddy-guide-prompt">Guide prompt</label>
+          <textarea id="buddy-guide-prompt" rows="6" maxlength="4000" placeholder="Example: Be a skeptical senior engineer. Look for the smallest reliable path, missing tests, and assumptions that need evidence."></textarea>
+          <div class="buddy-modal-hint">Buddy gets its own clean context containing only the request, a bounded progress snapshot, and the current draft.</div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" id="cancel-buddy-modal">Cancel</button>
+          <button type="button" id="save-buddy-modal">Save &amp; enable</button>
+        </div>
+      </div>
+    </div>
 
     <!-- Character (custom preset) modal -->
     <div id="custom-preset-modal" class="modal hidden">
@@ -2305,7 +2332,7 @@
               </div>
               <div class="settings-row">
                 <label class="settings-label">Max steps per message</label>
-                <input id="set-agentMaxRounds" type="text" inputmode="numeric" placeholder="20" class="settings-select" style="width:120px;">
+                <input id="set-agentMaxRounds" type="text" inputmode="numeric" placeholder="20" aria-label="Maximum agent steps per message (1–1000)" class="settings-select" style="width:120px;">
               </div>
               <div id="set-agentMsg" style="font-size:11px;color:color-mix(in srgb, var(--fg) 45%, transparent);"></div>
             </div>
@@ -2506,7 +2533,7 @@
 <script type="module" src="/static/js/chatRenderer.js?v=20260630toolmetrics"></script>
 <script type="module" src="/static/js/codeRunner.js"></script>
 <script type="module" src="/static/js/chatStream.js"></script>
-<script type="module" src="/static/js/chat.js?v=20260630toolmetrics"></script>
+<script type="module" src="/static/js/chat.js?v=20260719buddy"></script>
 <script type="module" src="/static/js/cookbook.js"></script>
 <script src="/static/js/cookbookSchedule.js"></script>
 <script type="module" src="/static/js/search-chat.js"></script>
@@ -2516,7 +2543,7 @@
 <script type="module" src="/static/js/settings.js"></script>
 <script type="module" src="/static/js/admin.js"></script>
 <script type="module" src="/static/js/assistant.js"></script>
-<script type="module" src="/static/app.js?v=20260630mdfontsize"></script>  <!-- app.js must be LAST -->
+<script type="module" src="/static/app.js?v=20260719buddy"></script>  <!-- app.js must be LAST -->
 <script type="module" src="/static/js/init.js"></script>
 <script type="module" src="/static/js/a11y.js"></script>
 <script nonce="{{CSP_NONCE}}">if('serviceWorker' in navigator){navigator.serviceWorker.register('/static/sw.js').catch(()=>{});}</script>

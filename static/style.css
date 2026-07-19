@@ -5958,6 +5958,96 @@ body.bg-pattern-sparkles {
     #custom-preset-modal .modal-footer button#save-custom-preset:hover {
       opacity: 0.85;
     }
+
+    /* Buddy Mode: compact prompt editor + in-stream consultation trace. */
+    .buddy-modal-content {
+      width: min(460px, 92vw);
+      background: var(--bg);
+      overflow: hidden;
+    }
+    .buddy-modal-copy {
+      margin: 4px 0 14px;
+      color: color-mix(in srgb, var(--fg) 72%, transparent);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .buddy-modal-content label {
+      display: block;
+      margin-bottom: 6px;
+      color: var(--fg);
+      font-size: 12px;
+      font-weight: 600;
+    }
+    #buddy-guide-prompt {
+      width: 100%;
+      min-height: 118px;
+      box-sizing: border-box;
+      resize: vertical;
+      padding: 9px 10px;
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      outline: none;
+      background: var(--panel);
+      color: var(--fg);
+      font-family: inherit;
+      font-size: 13px;
+      line-height: 1.45;
+    }
+    #buddy-guide-prompt:focus {
+      border-color: var(--accent, var(--red));
+      box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent, var(--red)) 18%, transparent);
+    }
+    .buddy-modal-hint {
+      margin-top: 7px;
+      color: color-mix(in srgb, var(--fg) 52%, transparent);
+      font-size: 11px;
+      line-height: 1.4;
+    }
+    .buddy-modal-content .modal-footer {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      margin-top: 14px;
+      padding-top: 10px;
+      border-top: 1px solid var(--border);
+    }
+    .buddy-modal-content .modal-footer button {
+      padding: 7px 13px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: transparent;
+      color: var(--fg);
+      cursor: pointer;
+    }
+    .buddy-modal-content .modal-footer #save-buddy-modal {
+      border-color: var(--accent, var(--red));
+      background: var(--accent, var(--red));
+      color: var(--bg);
+    }
+    .buddy-consult-note {
+      margin: 7px 10px;
+      padding: 6px 9px;
+      border-left: 2px solid var(--accent, var(--red));
+      border-radius: 4px;
+      background: color-mix(in srgb, var(--accent, var(--red)) 7%, transparent);
+      color: color-mix(in srgb, var(--fg) 68%, transparent);
+      font-size: 11px;
+      line-height: 1.4;
+    }
+    .buddy-consult-note summary {
+      cursor: pointer;
+      color: var(--fg);
+      font-weight: 600;
+    }
+    .buddy-consult-advice {
+      margin-top: 7px;
+      white-space: pre-wrap;
+    }
+    .buddy-consult-failed {
+      border-left-color: var(--border);
+      background: transparent;
+    }
+
     /* Toolbar visibility tab */
     .toolbar-hint {
       font-size: 12px;

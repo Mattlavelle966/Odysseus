@@ -1215,6 +1215,11 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       }
       if (isAgentMode) {
         fd.append('allow_web_search', el('web-toggle').checked ? 'true' : 'false');
+        const buddyChk = el('buddy-toggle');
+        if (buddyChk && buddyChk.checked) {
+          fd.append('buddy_enabled', 'true');
+          fd.append('buddy_prompt', String(toggleState.buddy_prompt || '').slice(0, 4000));
+        }
       }
       if (el('research-toggle').checked) {
         fd.append('use_research', 'true');
@@ -2797,6 +2802,43 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 // the stored plan + live-refresh the docked plan window.
                 const _pu = (json.data && json.data.plan) ? json.data.plan : '';
                 if (_pu) _setStoredPlan(_pu);
+
+              } else if (json.type === 'buddy_start') {
+                if (_isBg) continue;
+                _cancelThinkingTimer();
+                _removeThinkingSpinner();
+                const chatBox = document.getElementById('chat-history');
+                const note = document.createElement('div');
+                note.className = 'buddy-consult-note';
+                note.dataset.buddyRound = String(json.round || '');
+                note.dataset.buddyReason = json.reason || '';
+                note.textContent = json.reason === 'final'
+                  ? 'Buddy is reviewing the final path…'
+                  : 'Buddy is checking the path…';
+                if (chatBox) chatBox.appendChild(note);
+                uiModule.scrollHistory();
+
+              } else if (json.type === 'buddy_result') {
+                if (_isBg) continue;
+                const selector = `.buddy-consult-note[data-buddy-round="${String(json.round || '')}"][data-buddy-reason="${String(json.reason || '')}"]`;
+                const note = document.querySelector(selector);
+                if (note) {
+                  note.textContent = '';
+                  if (json.success && json.advice) {
+                    const details = document.createElement('details');
+                    const summary = document.createElement('summary');
+                    summary.textContent = 'Buddy suggested a path';
+                    const advice = document.createElement('div');
+                    advice.className = 'buddy-consult-advice';
+                    advice.textContent = json.advice;
+                    details.appendChild(summary);
+                    details.appendChild(advice);
+                    note.appendChild(details);
+                  } else {
+                    note.textContent = 'Buddy was unavailable; the primary agent continued.';
+                    note.classList.add('buddy-consult-failed');
+                  }
+                }
 
               } else if (json.type === 'agent_step') {
                 if (_isBg) continue;
