@@ -27,6 +27,8 @@ from email.mime.text import MIMEText
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
+from bs4 import BeautifulSoup, Comment, Doctype
+from markdownify import markdownify as html_to_markdown
 from sqlalchemy.exc import IntegrityError
 
 from core.database import (
@@ -67,6 +69,11 @@ JOB_STATES = {
 TERMINAL_STATES = {"delivered", "failed", "rejected", "cancelled"}
 AUTOMATION_HEADER = "X-Odysseus-Automation"
 AUTOMATION_VALUE = "email-deep-research-v1"
+RESEARCH_DEPTH_PRESETS = {
+    "quick": {"rounds": 2, "sources": 12, "timeout_seconds": 600},
+    "standard": {"rounds": 3, "sources": 30, "timeout_seconds": 1800},
+    "deep": {"rounds": 5, "sources": 60, "timeout_seconds": 5400},
+}
 _MESSAGE_ID_RE = re.compile(r"<[^<>\r\n]+>")
 _QUOTE_START_RE = re.compile(
     r"(?im)^(?:on .{0,160}wrote:|from:\s.+|-{2,}\s*original message\s*-{2,})$"
@@ -76,6 +83,13 @@ _SIGNATURE_RE = re.compile(
 )
 _TRACKING_RE = re.compile(
     r"(?is)<(?:img|iframe)\b[^>]*(?:width=[\"']?1|height=[\"']?1|display\s*:\s*none)[^>]*>"
+)
+_FENCED_HTML_RE = re.compile(
+    r"```html[^\S\r\n]*\r?\n(?P<html>.*?)\r?\n```",
+    re.IGNORECASE | re.DOTALL,
+)
+_HTML_DOCUMENT_RE = re.compile(
+    r"(?is)(?:<!doctype\s+html[^>]*>\s*)?<html\b[^>]*>.*?</html>"
 )
 
 
@@ -222,10 +236,64 @@ def render_report_html(report: str) -> str:
     return _safe_html(rendered)
 
 
+def _html_fragment_to_markdown(raw_html: str) -> str:
+    """Convert safe report body content to Markdown without CSS or document chrome."""
+    soup = BeautifulSoup(raw_html or "", "html.parser")
+    for node in soup.find_all(
+        [
+            "head", "style", "script", "form", "iframe", "object", "embed",
+            "applet", "canvas", "svg", "template", "noscript",
+        ]
+    ):
+        node.decompose()
+    for node in list(soup.contents):
+        if isinstance(node, Doctype):
+            node.extract()
+    for comment in soup.find_all(string=lambda value: isinstance(value, Comment)):
+        comment.extract()
+
+    root = soup.body if soup.body is not None else soup
+    fragment = "".join(str(child) for child in root.contents)
+    safe_fragment = _safe_html(fragment)
+    converted = html_to_markdown(
+        safe_fragment,
+        heading_style="ATX",
+        bullets="-",
+        strong_em_symbol="*",
+    )
+    converted = re.sub(r"\n[ \t]+\n", "\n\n", converted)
+    converted = re.sub(r"\n{3,}", "\n\n", converted)
+    return converted.strip()
+
+
+def report_to_markdown(report: str) -> str:
+    """Normalize Markdown, raw HTML, or fenced HTML reports to clean Markdown."""
+    source = str(report or "").replace("\r\n", "\n").replace("\r", "\n")
+
+    def replace_fence(match: re.Match) -> str:
+        return "\n\n" + _html_fragment_to_markdown(match.group("html")) + "\n\n"
+
+    converted = _FENCED_HTML_RE.sub(replace_fence, source)
+    converted = _HTML_DOCUMENT_RE.sub(
+        lambda match: "\n\n" + _html_fragment_to_markdown(match.group(0)) + "\n\n",
+        converted,
+    )
+    converted = re.sub(r"\n{3,}", "\n\n", converted).strip()
+    return converted
+
+
 def concise_summary(report: str, limit: int = 1400) -> str:
-    text = re.sub(r"<[^>]+>", " ", report or "")
+    report = report_to_markdown(report)
+    executive = re.search(
+        r"(?ims)^#{1,6}\s+executive\s+summary\s*$\s*(.*?)"
+        r"(?=^#{1,6}\s+\S|\Z)",
+        report,
+    )
+    text = executive.group(1) if executive else report
+    text = re.sub(r"<[^>]+>", " ", text)
     text = re.sub(r"(?m)^[#>*_`\-\s]+", "", text)
     text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+    text = re.sub(r"(?m)^\|?[\s:|-]+\|?\s*$", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
     if len(text) <= limit:
         return text
@@ -261,11 +329,16 @@ class EmailResearchConfig:
         "Reference: {{job_reference}}"
     )
     final_email_template: str = (
-        "Research is complete. A concise summary and the full report follow."
+        "Research is complete. A concise summary is below and the full "
+        "report is attached."
     )
     html_attachment_threshold: int = 200000
     retry_limit: int = 5
+    research_depth_preset: str = "standard"
+    research_rounds: int = 3
+    research_source_limit: int = 30
     research_timeout_seconds: int = 1800
+    early_stop_no_useful_findings: bool = True
     allow_plain_text_attachments: bool = True
     server_research_instruction: str = ""
 
@@ -288,6 +361,23 @@ class EmailResearchConfig:
             if not isinstance(value, (list, tuple)):
                 return getattr(defaults, key)
             return tuple(str(item).strip().lower() for item in value if str(item).strip())
+
+        preset = str(
+            raw.get("research_depth_preset") or defaults.research_depth_preset
+        ).strip().lower()
+        if preset not in {*RESEARCH_DEPTH_PRESETS, "custom"}:
+            preset = defaults.research_depth_preset
+        if preset in RESEARCH_DEPTH_PRESETS:
+            limits = RESEARCH_DEPTH_PRESETS[preset]
+            research_rounds = limits["rounds"]
+            research_source_limit = limits["sources"]
+            research_timeout_seconds = limits["timeout_seconds"]
+        else:
+            research_rounds = integer("research_rounds", 1, 20)
+            research_source_limit = integer("research_source_limit", 1, 500)
+            research_timeout_seconds = integer(
+                "research_timeout_seconds", 60, 86400
+            )
 
         return cls(
             enabled=bool(raw.get("enabled", False)),
@@ -317,7 +407,13 @@ class EmailResearchConfig:
                 "html_attachment_threshold", 10000, 10_000_000
             ),
             retry_limit=integer("retry_limit", 0, 20),
-            research_timeout_seconds=integer("research_timeout_seconds", 60, 86400),
+            research_depth_preset=preset,
+            research_rounds=research_rounds,
+            research_source_limit=research_source_limit,
+            research_timeout_seconds=research_timeout_seconds,
+            early_stop_no_useful_findings=bool(
+                raw.get("early_stop_no_useful_findings", True)
+            ),
             allow_plain_text_attachments=bool(
                 raw.get("allow_plain_text_attachments", True)
             ),
@@ -646,39 +742,23 @@ def build_final_reply(
     config: EmailResearchConfig,
     from_address: str,
 ) -> email.message.Message:
-    summary = concise_summary(report)
-    report_html = render_report_html(report)
+    report_markdown = report_to_markdown(report)
+    summary = concise_summary(report_markdown)
     intro = config.final_email_template.replace("{{job_reference}}", job.id)
-    plain = f"{intro}\n\nSummary\n{summary}"
-    full_document = (
-        "<!doctype html><html><head><meta charset=\"utf-8\">"
-        "<title>Research report</title></head><body>"
-        f"<h2>Summary</h2><p>{html.escape(summary)}</p>"
-        f"{report_html}</body></html>"
+    plain = (
+        f"{intro}\n\nExecutive summary\n\n{summary}\n\n"
+        "The complete research report is attached as report.md."
     )
 
     msg = _base_message(
         job, from_address, _provider_message_id(job.final_delivery_idempotency_key)
     )
-    alternative = MIMEMultipart("alternative")
-    alternative.attach(MIMEText(plain, "plain", "utf-8"))
-    attachment = None
-    if len(full_document.encode("utf-8")) <= config.html_attachment_threshold:
-        html_body = f"<p>{html.escape(intro)}</p>{full_document}"
-    else:
-        html_body = (
-            f"<p>{html.escape(intro)}</p><h2>Summary</h2>"
-            f"<p>{html.escape(summary)}</p>"
-            "<p>The complete sanitized HTML report is attached.</p>"
-        )
-        attachment = MIMEText(full_document, "html", "utf-8")
-        attachment.add_header(
-            "Content-Disposition", "attachment", filename="report.html"
-        )
-    alternative.attach(MIMEText(_safe_html(html_body), "html", "utf-8"))
-    msg.attach(alternative)
-    if attachment is not None:
-        msg.attach(attachment)
+    msg.attach(MIMEText(plain, "plain", "utf-8"))
+    attachment = MIMEText(report_markdown, "markdown", "utf-8")
+    attachment.add_header(
+        "Content-Disposition", "attachment", filename="report.md"
+    )
+    msg.attach(attachment)
     return msg
 
 
@@ -730,21 +810,22 @@ class EmailResearchWorker:
     async def _loop(self) -> None:
         while not self._stop.is_set():
             config = EmailResearchConfig.load()
-            if config.enabled:
-                try:
-                    await self.run_cycle()
-                    self.status["poll_attempt_count"] = 0
-                except Exception as exc:
-                    self.status["poll_attempt_count"] = min(
-                        config.retry_limit + 1,
-                        int(self.status.get("poll_attempt_count") or 0) + 1,
-                    )
-                    self.status["last_error"] = type(exc).__name__
-                    logger.exception(json.dumps({
-                        "event": "email_research_cycle_failed",
-                        "attempt_count": self.status["poll_attempt_count"],
-                        "error_category": type(exc).__name__,
-                    }))
+            try:
+                # Disabling automation stops new inbox intake, but durable jobs
+                # that were already accepted must still be polled and delivered.
+                await self.run_cycle()
+                self.status["poll_attempt_count"] = 0
+            except Exception as exc:
+                self.status["poll_attempt_count"] = min(
+                    config.retry_limit + 1,
+                    int(self.status.get("poll_attempt_count") or 0) + 1,
+                )
+                self.status["last_error"] = type(exc).__name__
+                logger.exception(json.dumps({
+                    "event": "email_research_cycle_failed",
+                    "attempt_count": self.status["poll_attempt_count"],
+                    "error_category": type(exc).__name__,
+                }))
             failures = int(self.status.get("poll_attempt_count") or 0)
             interval = min(
                 3600,
@@ -772,8 +853,27 @@ class EmailResearchWorker:
             config = EmailResearchConfig.load()
             try:
                 if not config.enabled and not force:
-                    result = {"result": "no-op", "reason": "automation_disabled"}
+                    progressed = await self._advance_due(config)
+                    result = {
+                        "result": "success" if progressed else "no-op",
+                        "reason": "automation_disabled_intake",
+                        "jobs_progressed": progressed,
+                        "duration_ms": round(
+                            (time.monotonic() - started) * 1000
+                        ),
+                    }
                     self.status["last_cycle_result"] = result
+                    self.status["last_error"] = None
+                    _log_event(
+                        logging.INFO,
+                        "email_research_cycle_complete",
+                        account_id=config.email_account_id,
+                        accepted=0,
+                        rejected=0,
+                        jobs_progressed=progressed,
+                        intake_enabled=False,
+                        duration_ms=result["duration_ms"],
+                    )
                     return result
                 if not config.email_account_id:
                     result = {"result": "rejected", "reason": "email_account_not_selected"}
@@ -882,6 +982,12 @@ class EmailResearchWorker:
                     "ack", account.owner or "", account.id, inbound.message_id
                 ),
                 research_status="rejected" if reason else "pending",
+                research_depth_preset=config.research_depth_preset,
+                research_max_rounds=config.research_rounds,
+                research_max_sources=config.research_source_limit,
+                research_timeout_seconds=config.research_timeout_seconds,
+                research_early_stop=config.early_stop_no_useful_findings,
+                progress_phase="rejected" if reason else "queued",
                 final_delivery_status="not_applicable" if reason else "pending",
                 final_delivery_idempotency_key=_stable_key(
                     "final", account.owner or "", account.id, inbound.message_id
@@ -1034,7 +1140,7 @@ class EmailResearchWorker:
                     await self._ensure_research_started(job, config)
                     return True, True
                 state = str(status.get("status") or "")
-                self._set_research_status(job.id, state)
+                self._record_research_progress(job.id, state, status)
                 if state == "running":
                     return False, False
                 if state == "done":
@@ -1046,7 +1152,10 @@ class EmailResearchWorker:
                     )
                     self._research_complete(job.id, location)
                     job = self._load_job(job.id)
-                elif state in {"error", "cancelled"}:
+                elif state == "cancelled":
+                    self._mark_cancelled(job.id)
+                    return True, False
+                elif state == "error":
                     raise WorkflowError(f"Research ended with state {state}")
 
             if job and job.state in {"research_complete", "delivering"}:
@@ -1207,17 +1316,39 @@ class EmailResearchWorker:
             sanitized_html_body=job.sanitized_html_body,
         )
         prompt = build_research_prompt(inbound, config)
+
+        def wake_delivery_cycle(*_args, **_kwargs) -> None:
+            # Research runs independently in the same application event loop.
+            # Wake the deterministic worker as soon as its persisted result is
+            # ready instead of waiting for the next inbox polling interval.
+            self._wake.set()
+
         self.research_handler.start_research(
             session_id=session_id,
             query=prompt,
             llm_endpoint=endpoint,
             llm_model=model,
-            max_time=config.research_timeout_seconds,
-            hard_timeout=config.research_timeout_seconds,
+            max_time=job.research_timeout_seconds,
+            hard_timeout=job.research_timeout_seconds,
+            max_rounds=job.research_max_rounds,
+            max_total_sources=job.research_max_sources,
+            early_stop_no_useful_findings=job.research_early_stop,
             llm_headers=headers,
+            on_complete=wake_delivery_cycle,
             owner=job.owner,
         )
-        self._transition(job.id, "researching", research_status="running")
+        if job.stop_requested_at:
+            self.research_handler.finish_research_now(session_id)
+        self._transition(
+            job.id,
+            "researching",
+            research_status="running",
+            progress_phase="starting",
+            progress_round=0,
+            progress_sources=0,
+            progress_elapsed_seconds=0,
+            progress_updated_at=_utcnow(),
+        )
 
     @staticmethod
     def _resolve_research_endpoint(
@@ -1272,6 +1403,7 @@ class EmailResearchWorker:
             job.research_model = model
             job.research_status = "queued"
             job.state = "research_queued"
+            job.progress_phase = "queued"
             db.commit()
         finally:
             db.close()
@@ -1300,11 +1432,26 @@ class EmailResearchWorker:
         finally:
             db.close()
 
-    def _set_research_status(self, job_id: str, status: str) -> None:
+    def _record_research_progress(
+        self, job_id: str, status: str, payload: dict
+    ) -> None:
         db = SessionLocal()
         try:
             job = db.get(EmailResearchJob, job_id)
             job.research_status = status
+            progress = payload.get("progress") or {}
+            if progress.get("phase"):
+                job.progress_phase = str(progress["phase"])[:64]
+            if progress.get("round") is not None:
+                job.progress_round = max(0, int(progress["round"]))
+            if progress.get("total_sources") is not None:
+                job.progress_sources = max(0, int(progress["total_sources"]))
+            started_at = payload.get("started_at")
+            if started_at:
+                job.progress_elapsed_seconds = max(
+                    0, int(time.time() - float(started_at))
+                )
+            job.progress_updated_at = _utcnow()
             db.commit()
         finally:
             db.close()
@@ -1314,10 +1461,25 @@ class EmailResearchWorker:
         try:
             job = db.get(EmailResearchJob, job_id)
             job.research_status = "done"
+            job.progress_phase = "complete"
             job.final_report_location = location
             job.final_report_identifier = job.research_session_id
             job.state = "research_complete"
             job.result_status = "partial"
+            db.commit()
+        finally:
+            db.close()
+
+    def _mark_cancelled(self, job_id: str) -> None:
+        db = SessionLocal()
+        try:
+            job = db.get(EmailResearchJob, job_id)
+            job.state = "cancelled"
+            job.research_status = "cancelled"
+            job.result_status = "cancelled"
+            job.progress_phase = "cancelled"
+            job.completed_at = _utcnow()
+            job.next_retry_at = None
             db.commit()
         finally:
             db.close()
@@ -1441,15 +1603,44 @@ class EmailResearchWorker:
                 EmailResearchJob.id == job_id,
                 EmailResearchJob.owner == owner,
                 EmailResearchJob.state.in_(
-                    {"received", "acknowledged", "research_queued", "retry_wait"}
+                    {
+                        "received", "acknowledged", "research_queued",
+                        "retry_wait", "researching",
+                    }
                 ),
             ).first()
             if not job:
                 return False
+            if job.state == "researching" and job.research_session_id:
+                self.research_handler.cancel_research(job.research_session_id)
             job.state = "cancelled"
+            job.research_status = "cancelled"
             job.result_status = "cancelled"
+            job.progress_phase = "cancelled"
             job.completed_at = _utcnow()
             job.next_retry_at = None
+            db.commit()
+            return True
+        finally:
+            db.close()
+
+    def stop_and_write_job(self, job_id: str, owner: str) -> bool:
+        db = SessionLocal()
+        try:
+            job = db.query(EmailResearchJob).filter(
+                EmailResearchJob.id == job_id,
+                EmailResearchJob.owner == owner,
+                EmailResearchJob.state == "researching",
+            ).first()
+            if not job or not job.research_session_id:
+                return False
+            if not self.research_handler.finish_research_now(
+                job.research_session_id
+            ):
+                return False
+            job.stop_requested_at = _utcnow()
+            job.progress_phase = "stopping"
+            job.progress_updated_at = _utcnow()
             db.commit()
             return True
         finally:
@@ -1475,10 +1666,39 @@ class EmailResearchWorker:
                 ~EmailResearchJob.state.in_(TERMINAL_STATES),
             ).count()
             counts["completed"] = counts["delivered"]
-            return {
-                "worker": dict(self.status),
-                "counts": counts,
-                "jobs": [
+            jobs = []
+            for row in rows:
+                progress = {
+                    "phase": row.progress_phase,
+                    "round": row.progress_round,
+                    "sources": row.progress_sources,
+                    "elapsed_seconds": row.progress_elapsed_seconds,
+                    "max_rounds": row.research_max_rounds,
+                    "max_sources": row.research_max_sources,
+                    "timeout_seconds": row.research_timeout_seconds,
+                    "stop_requested": bool(row.stop_requested_at),
+                }
+                if row.state == "researching" and row.research_session_id:
+                    live = self.research_handler.get_status(
+                        row.research_session_id
+                    )
+                    if live:
+                        event = live.get("progress") or {}
+                        progress["phase"] = (
+                            event.get("phase") or progress["phase"]
+                        )
+                        if event.get("round") is not None:
+                            progress["round"] = int(event["round"])
+                        if event.get("total_sources") is not None:
+                            progress["sources"] = int(
+                                event["total_sources"]
+                            )
+                        if live.get("started_at"):
+                            progress["elapsed_seconds"] = max(
+                                0,
+                                int(time.time() - float(live["started_at"])),
+                            )
+                jobs.append(
                     {
                         "id": row.id,
                         "account_id": row.email_account_id,
@@ -1502,9 +1722,15 @@ class EmailResearchWorker:
                         "error_summary": row.last_error_summary,
                         "research_session_id": row.research_session_id,
                         "delivery_status": row.final_delivery_status,
+                        "depth_preset": row.research_depth_preset,
+                        "early_stop": row.research_early_stop,
+                        "progress": progress,
                     }
-                    for row in rows
-                ],
+                )
+            return {
+                "worker": dict(self.status),
+                "counts": counts,
+                "jobs": jobs,
             }
         finally:
             db.close()

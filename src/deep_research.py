@@ -197,6 +197,8 @@ class DeepResearcher:
         max_rounds: int = 8,
         max_time: int = 300,
         max_urls_per_round: int = 3,
+        max_total_sources: Optional[int] = None,
+        early_stop_no_useful_findings: bool = False,
         max_content_chars: int = 15000,
         max_report_tokens: int = 8192,
         extraction_timeout: int = 90,
@@ -218,6 +220,13 @@ class DeepResearcher:
         self.max_rounds = max_rounds
         self.max_time = max_time
         self.max_urls_per_round = max_urls_per_round
+        self.max_total_sources = (
+            max(1, int(max_total_sources))
+            if max_total_sources is not None else None
+        )
+        self.early_stop_no_useful_findings = bool(
+            early_stop_no_useful_findings
+        )
         self.max_content_chars = max_content_chars
         self.max_report_tokens = max_report_tokens
         self.extraction_timeout = min(3600, max(15, int(extraction_timeout or 90)))
@@ -229,6 +238,7 @@ class DeepResearcher:
         self.synthesis_window = synthesis_window
         self._progress = progress_callback
         self._cancelled = False
+        self._stop_after_current = False
         self._start_time: float = 0
         self.queries_used: Set[str] = set()
         self.urls_fetched: Set[str] = set()
@@ -245,6 +255,10 @@ class DeepResearcher:
     def cancel(self):
         """Request cooperative cancellation of the research loop."""
         self._cancelled = True
+
+    def request_stop_and_write(self):
+        """Finish the current operation, then synthesize the report collected so far."""
+        self._stop_after_current = True
 
     # ------------------------------------------------------------------
     # Public API
@@ -293,6 +307,20 @@ class DeepResearcher:
             if self._cancelled:
                 logger.info(f"Research cancelled after {round_num - 1} rounds")
                 break
+            if self._stop_after_current and (report or findings):
+                logger.info(
+                    "Stop-and-write requested after %d completed rounds",
+                    round_num - 1,
+                )
+                break
+            if (
+                self.max_total_sources is not None
+                and len(self.urls_fetched) >= self.max_total_sources
+            ):
+                logger.info(
+                    "Source limit reached (%d)", self.max_total_sources
+                )
+                break
             if self._time_exceeded():
                 logger.info(f"Time limit reached after {round_num - 1} rounds")
                 break
@@ -323,6 +351,19 @@ class DeepResearcher:
             else:
                 consecutive_empty_rounds += 1
                 logger.info(f"Round {round_num}: no new findings ({consecutive_empty_rounds} consecutive empty)")
+                if self.early_stop_no_useful_findings and findings:
+                    logger.info(
+                        "Early stop after round %d: no useful new findings",
+                        round_num,
+                    )
+                    self._emit(
+                        phase="writing",
+                        round=round_num,
+                        total_sources=len(self.urls_fetched),
+                        total_findings=len(findings),
+                        message="No useful new findings; writing report.",
+                    )
+                    break
                 if consecutive_empty_rounds >= self.max_empty_rounds:
                     logger.warning(f"Search appears to be down — {self.max_empty_rounds} consecutive rounds with no results")
                     err_detail = getattr(self, '_last_search_error', 'unknown error')
@@ -341,6 +382,19 @@ class DeepResearcher:
                            total_sources=len(self.urls_fetched),
                            total_findings=len(findings))
                 report = await self._synthesize(question, findings, report)
+
+            if self._stop_after_current:
+                logger.info("Stop-and-write requested; finalizing current report")
+                break
+            if (
+                self.max_total_sources is not None
+                and len(self.urls_fetched) >= self.max_total_sources
+            ):
+                logger.info(
+                    "Source limit reached (%d); finalizing report",
+                    self.max_total_sources,
+                )
+                break
 
             # DECIDE
             if round_num >= self.min_rounds:
@@ -515,6 +569,15 @@ class DeepResearcher:
 
         # Collect URLs to fetch from all search results
         urls_to_fetch = []
+        source_capacity = (
+            max(0, self.max_total_sources - len(self.urls_fetched))
+            if self.max_total_sources is not None else None
+        )
+        if source_capacity == 0:
+            return all_findings
+        per_round_capacity = self.max_urls_per_round * len(queries)
+        if source_capacity is not None:
+            per_round_capacity = min(per_round_capacity, source_capacity)
         for result in search_results:
             if isinstance(result, Exception):
                 logger.warning(f"Search error: {result}")
@@ -530,8 +593,10 @@ class DeepResearcher:
                         "url": url,
                         "title": r.get("title", "") or url,
                     })
-                if len(urls_to_fetch) >= self.max_urls_per_round * len(queries):
+                if len(urls_to_fetch) >= per_round_capacity:
                     break
+            if len(urls_to_fetch) >= per_round_capacity:
+                break
 
         if self._cancelled or self._time_exceeded():
             return all_findings

@@ -3185,13 +3185,15 @@ async function initEmailResearchAutomation() {
     final_email_template: 'er-final-template',
     html_attachment_threshold: 'er-html-threshold',
     retry_limit: 'er-retry-limit',
+    research_rounds: 'er-rounds',
+    research_source_limit: 'er-source-limit',
     research_timeout_seconds: 'er-timeout',
   };
   const numeric = new Set([
     'polling_interval_seconds', 'maximum_request_length', 'maximum_attachment_size',
     'maximum_simultaneous_jobs', 'maximum_requests_per_sender_per_day',
     'maximum_total_jobs_per_day', 'html_attachment_threshold', 'retry_limit',
-    'research_timeout_seconds',
+    'research_rounds', 'research_source_limit', 'research_timeout_seconds',
   ]);
   const listFields = {
     allowed_sender_addresses: 'er-allowed-addresses',
@@ -3226,8 +3228,11 @@ async function initEmailResearchAutomation() {
     el('er-account').value = config.email_account_id || '';
     el('er-endpoint').value = config.research_endpoint_id || '';
     el('er-plain-attachments').checked = !!config.allow_plain_text_attachments;
+    el('er-depth-preset').value = config.research_depth_preset || 'standard';
+    el('er-early-stop').checked = config.early_stop_no_useful_findings !== false;
     Object.entries(fields).forEach(([key, id]) => { if (el(id)) el(id).value = config[key] ?? ''; });
     Object.entries(listFields).forEach(([key, id]) => { if (el(id)) el(id).value = (config[key] || []).join('\n'); });
+    updateDepthInputs();
   };
   const load = async () => {
     try {
@@ -3251,6 +3256,8 @@ async function initEmailResearchAutomation() {
     next.email_account_id = el('er-account').value;
     next.research_endpoint_id = el('er-endpoint').value;
     next.allow_plain_text_attachments = el('er-plain-attachments').checked;
+    next.research_depth_preset = el('er-depth-preset').value;
+    next.early_stop_no_useful_findings = el('er-early-stop').checked;
     Object.entries(fields).forEach(([key, id]) => {
       const value = el(id).value;
       next[key] = numeric.has(key) ? Number(value) : value;
@@ -3258,6 +3265,25 @@ async function initEmailResearchAutomation() {
     Object.entries(listFields).forEach(([key, id]) => { next[key] = splitList(el(id).value); });
     return next;
   };
+  const depthPresets = {
+    quick: { rounds: 2, sources: 12, timeout: 600 },
+    standard: { rounds: 3, sources: 30, timeout: 1800 },
+    deep: { rounds: 5, sources: 60, timeout: 5400 },
+  };
+  function updateDepthInputs() {
+    const preset = el('er-depth-preset').value;
+    const values = depthPresets[preset];
+    const custom = preset === 'custom';
+    ['er-rounds', 'er-source-limit', 'er-timeout'].forEach(id => {
+      el(id).disabled = !custom;
+    });
+    if (values) {
+      el('er-rounds').value = values.rounds;
+      el('er-source-limit').value = values.sources;
+      el('er-timeout').value = values.timeout;
+    }
+    el('er-custom-depth-row').style.opacity = custom ? '1' : '.65';
+  }
   const save = async (overrides = {}) => {
     try {
       const next = { ...collect(), ...overrides };
@@ -3273,6 +3299,12 @@ async function initEmailResearchAutomation() {
     }
   };
   const formatTime = value => value ? new Date(value).toLocaleString() : '—';
+  const formatDuration = seconds => {
+    const value = Math.max(0, Number(seconds) || 0);
+    const minutes = Math.floor(value / 60);
+    const remainder = value % 60;
+    return minutes ? `${minutes}m ${remainder}s` : `${remainder}s`;
+  };
   const renderStatus = data => {
     const worker = data.worker || {};
     el('er-worker-status').textContent = `${worker.running ? 'running' : 'idle'} · last ${formatTime(worker.last_inbox_poll)} · next ${formatTime(worker.next_inbox_poll)}`;
@@ -3284,16 +3316,22 @@ async function initEmailResearchAutomation() {
       return;
     }
     body.innerHTML = jobs.map(job => {
+      const progress = job.progress || {};
       const retry = job.state === 'failed'
         ? `<button class="admin-btn-sm er-retry-job" data-job="${esc(job.id)}">Retry</button>` : '';
-      const cancel = ['received', 'acknowledged', 'research_queued', 'retry_wait'].includes(job.state)
+      const stop = job.state === 'researching'
+        ? `<button class="admin-btn-sm er-stop-job" data-job="${esc(job.id)}">Stop &amp; write</button>` : '';
+      const cancel = ['received', 'acknowledged', 'research_queued', 'retry_wait', 'researching'].includes(job.state)
         ? `<button class="admin-btn-sm er-cancel-job" data-job="${esc(job.id)}">Cancel</button>` : '';
+      const progressText = job.state === 'researching'
+        ? `${esc(progress.phase || 'running')} · round ${progress.round || 0}/${progress.max_rounds || '—'} · sources ${progress.sources || 0}/${progress.max_sources || '—'} · ${esc(formatDuration(progress.elapsed_seconds))}/${esc(formatDuration(progress.timeout_seconds))}`
+        : `${job.attempt_count || 0} attempt(s)`;
       return `<tr style="border-top:1px solid var(--border)">
         <td style="padding:7px 5px">${esc(job.state)}</td>
         <td style="padding:7px 5px"><div>${esc(job.sender)}</div><div style="opacity:.65;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(job.subject)}</div></td>
         <td style="padding:7px 5px">${esc(formatTime(job.updated_at))}</td>
-        <td style="padding:7px 5px"><div>${job.attempt_count || 0} attempt(s)</div><div style="opacity:.65;max-width:260px">${esc(job.error_summary || (job.next_retry_at ? `next ${formatTime(job.next_retry_at)}` : ''))}</div></td>
-        <td style="padding:7px 5px;white-space:nowrap">${retry}${cancel}</td>
+        <td style="padding:7px 5px"><div>${progressText}</div><div style="opacity:.65;max-width:300px">${esc(job.error_summary || (job.next_retry_at ? `next ${formatTime(job.next_retry_at)}` : `${job.depth_preset || 'standard'}${job.early_stop ? ' · early stop on' : ''}`))}</div></td>
+        <td style="padding:7px 5px;white-space:nowrap">${retry}${stop}${cancel}</td>
       </tr>`;
     }).join('');
   };
@@ -3305,6 +3343,7 @@ async function initEmailResearchAutomation() {
     }
   };
   el('er-save').addEventListener('click', () => save());
+  el('er-depth-preset').addEventListener('change', updateDepthInputs);
   el('er-disable').addEventListener('click', () => save({ enabled: false }));
   el('er-run-now').addEventListener('click', async () => {
     try {
@@ -3329,7 +3368,9 @@ async function initEmailResearchAutomation() {
   el('er-jobs-body').addEventListener('click', async event => {
     const button = event.target.closest('[data-job]');
     if (!button) return;
-    const action = button.classList.contains('er-retry-job') ? 'retry' : 'cancel';
+    const action = button.classList.contains('er-retry-job')
+      ? 'retry'
+      : (button.classList.contains('er-stop-job') ? 'stop-and-write' : 'cancel');
     try {
       await request(`/api/email-research/jobs/${encodeURIComponent(button.dataset.job)}/${action}`, { method: 'POST' });
       await refreshStatus();

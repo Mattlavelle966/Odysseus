@@ -251,6 +251,8 @@ class ResearchHandler:
         prior_findings: list = None,
         prior_urls: set = None,
         max_rounds: int = 20,
+        max_total_sources: int = None,
+        early_stop_no_useful_findings: bool = False,
         search_provider: str = None,
         category: str = None,
         extraction_timeout: int = None,
@@ -302,6 +304,7 @@ class ResearchHandler:
             "result": None,
             "started_at": time.time(),
             "category": category,
+            "stop_requested": False,
             # SECURITY: track ownership so all reads / saves can filter by user.
             "owner": owner or "",
         }
@@ -335,6 +338,8 @@ class ResearchHandler:
                         prior_findings=prior_findings,
                         prior_urls=prior_urls,
                         max_rounds=max_rounds,
+                        max_total_sources=max_total_sources,
+                        early_stop_no_useful_findings=early_stop_no_useful_findings,
                         search_provider=search_provider,
                         category=category,
                         extraction_timeout=extraction_timeout,
@@ -458,6 +463,25 @@ class ResearchHandler:
         if task and not task.done():
             task.cancel()
         entry["status"] = "cancelled"
+        return True
+
+    def finish_research_now(self, session_id: str) -> bool:
+        """Ask a running researcher to stop iterating and write from current findings."""
+        entry = self._active_tasks.get(session_id)
+        if not entry or entry.get("status") != "running":
+            return False
+        entry["stop_requested"] = True
+        researcher = entry.get("researcher")
+        if researcher:
+            researcher.request_stop_and_write()
+        progress = dict(entry.get("progress") or {})
+        progress.update(
+            {
+                "phase": "stopping",
+                "message": "Stopping after the current operation and writing report.",
+            }
+        )
+        entry["progress"] = progress
         return True
 
     def get_result(self, session_id: str) -> Optional[str]:
@@ -750,6 +774,8 @@ class ResearchHandler:
         prior_findings: list = None,
         prior_urls: set = None,
         max_rounds: int = 20,
+        max_total_sources: int = None,
+        early_stop_no_useful_findings: bool = False,
         search_provider: str = None,
         category: str = None,
         extraction_timeout: int = None,
@@ -821,6 +847,8 @@ class ResearchHandler:
                 max_rounds=max_rounds,
                 min_rounds=max(2, max_rounds - 2),
                 max_time=max_time,
+                max_total_sources=max_total_sources,
+                early_stop_no_useful_findings=early_stop_no_useful_findings,
                 max_report_tokens=_max_report_tokens,
                 extraction_timeout=_extraction_timeout,
                 planning_timeout=_planning_timeout,
@@ -832,6 +860,8 @@ class ResearchHandler:
             )
             if _task_entry is not None:
                 _task_entry["researcher"] = researcher
+                if _task_entry.get("stop_requested"):
+                    researcher.request_stop_and_write()
 
             start_time = time.time()
             report = await researcher.research(

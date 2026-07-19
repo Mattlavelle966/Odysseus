@@ -51,7 +51,10 @@ def setup_email_research_routes(worker: EmailResearchWorker) -> APIRouter:
     @router.get("/settings")
     async def get_automation_settings(request: Request):
         owner = require_admin(request)
-        settings = load_settings().get("email_research_automation", {}) or {}
+        settings = {
+            key: list(value) if isinstance(value, tuple) else value
+            for key, value in EmailResearchConfig.load().__dict__.items()
+        }
         db = SessionLocal()
         try:
             accounts = db.query(EmailAccount).filter(
@@ -102,6 +105,12 @@ def setup_email_research_routes(worker: EmailResearchWorker) -> APIRouter:
         body = await request.json()
         if not isinstance(body, dict):
             raise HTTPException(400, "Settings must be an object")
+        # Backward compatibility for development instances that previously
+        # persisted this experimental field. The reset worker does not expose
+        # or use a round cap, but the settings form carries loaded keys forward
+        # when saving. Ignore only this retired key so an old settings object
+        # cannot make the entire current form unsaveable.
+        body.pop("research_max_rounds", None)
         account_id = str(body.get("email_account_id") or "").strip()
         if body.get("enabled") and not account_id:
             raise HTTPException(400, "Select an email account before enabling automation")
@@ -164,8 +173,15 @@ def setup_email_research_routes(worker: EmailResearchWorker) -> APIRouter:
     async def cancel_job(job_id: str, request: Request):
         owner = require_admin(request)
         if not worker.cancel_job(job_id, owner):
-            raise HTTPException(409, "Only queued/retrying jobs can be cancelled")
+            raise HTTPException(409, "Job cannot be cancelled in its current state")
         return {"result": "cancelled", "job_id": job_id}
+
+    @router.post("/jobs/{job_id}/stop-and-write")
+    async def stop_and_write_job(job_id: str, request: Request):
+        owner = require_admin(request)
+        if not worker.stop_and_write_job(job_id, owner):
+            raise HTTPException(409, "Only active research can be stopped and written")
+        return {"result": "stopping", "job_id": job_id}
 
     @router.post("/test-acknowledgement")
     async def test_acknowledgement(request: Request):

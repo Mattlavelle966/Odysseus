@@ -479,6 +479,17 @@ class EmailResearchJob(TimestampMixin, Base):
     research_session_id = Column(String, nullable=True, unique=True, index=True)
     research_status = Column(String, nullable=False, default="pending")
     research_model = Column(String, nullable=True)
+    research_depth_preset = Column(String, nullable=False, default="standard")
+    research_max_rounds = Column(Integer, nullable=False, default=3)
+    research_max_sources = Column(Integer, nullable=False, default=30)
+    research_timeout_seconds = Column(Integer, nullable=False, default=1800)
+    research_early_stop = Column(Boolean, nullable=False, default=True)
+    progress_phase = Column(String, nullable=False, default="queued")
+    progress_round = Column(Integer, nullable=False, default=0)
+    progress_sources = Column(Integer, nullable=False, default=0)
+    progress_elapsed_seconds = Column(Integer, nullable=False, default=0)
+    progress_updated_at = Column(DateTime, nullable=True)
+    stop_requested_at = Column(DateTime, nullable=True)
     final_report_location = Column(Text, nullable=True)
     final_report_identifier = Column(String, nullable=True)
 
@@ -1230,11 +1241,27 @@ def _migrate_email_research_columns():
                 "PRAGMA table_info(email_research_jobs)"
             ).fetchall()
         }
-        if columns and "sanitized_html_body" not in columns:
-            conn.execute(
-                "ALTER TABLE email_research_jobs "
-                "ADD COLUMN sanitized_html_body TEXT NOT NULL DEFAULT ''"
-            )
+        additions = {
+            "sanitized_html_body": "TEXT NOT NULL DEFAULT ''",
+            "research_depth_preset": "VARCHAR NOT NULL DEFAULT 'standard'",
+            "research_max_rounds": "INTEGER NOT NULL DEFAULT 3",
+            "research_max_sources": "INTEGER NOT NULL DEFAULT 30",
+            "research_timeout_seconds": "INTEGER NOT NULL DEFAULT 1800",
+            "research_early_stop": "BOOLEAN NOT NULL DEFAULT 1",
+            "progress_phase": "VARCHAR NOT NULL DEFAULT 'queued'",
+            "progress_round": "INTEGER NOT NULL DEFAULT 0",
+            "progress_sources": "INTEGER NOT NULL DEFAULT 0",
+            "progress_elapsed_seconds": "INTEGER NOT NULL DEFAULT 0",
+            "progress_updated_at": "DATETIME",
+            "stop_requested_at": "DATETIME",
+        }
+        for name, sql_type in additions.items():
+            if columns and name not in columns:
+                conn.execute(
+                    f"ALTER TABLE email_research_jobs ADD COLUMN {name} {sql_type}"
+                )
+                columns.add(name)
+        if columns:
             conn.commit()
     except Exception as exc:
         logger.warning("email research column migration failed: %s", exc)

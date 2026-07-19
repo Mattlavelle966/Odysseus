@@ -2001,6 +2001,9 @@
               <div class="settings-row"><label class="settings-label">Email account</label><select id="er-account" class="settings-select" style="flex:1"><option value="">Select an account…</option></select></div>
               <div class="settings-row"><label class="settings-label">Model endpoint</label><select id="er-endpoint" class="settings-select" style="flex:1"><option value="">Default endpoint</option></select></div>
               <div class="settings-row"><label class="settings-label">Research model</label><input id="er-model" class="settings-input" placeholder="Default Deep Research model"></div>
+              <div class="settings-row"><label class="settings-label">Research depth</label><select id="er-depth-preset" class="settings-select" style="flex:1"><option value="quick">Quick — 2 rounds · 12 sources · 10 min</option><option value="standard">Standard — 3 rounds · 30 sources · 30 min</option><option value="deep">Deep — 5 rounds · 60 sources · 90 min</option><option value="custom">Custom</option></select></div>
+              <div class="settings-row" id="er-custom-depth-row"><label class="settings-label">Custom depth</label><input id="er-rounds" class="settings-input" type="number" min="1" max="20" title="Maximum rounds"><input id="er-source-limit" class="settings-input" type="number" min="1" max="500" title="Maximum sources"><input id="er-timeout" class="settings-input" type="number" min="60" max="86400" title="Maximum time, seconds"></div>
+              <div class="settings-row"><label class="settings-label">Early stopping</label><label style="font-size:11px;display:flex;align-items:center;gap:6px"><input id="er-early-stop" type="checkbox"> Stop when a completed round finds no useful new information</label></div>
               <div class="settings-row"><label class="settings-label">Polling / concurrency</label><input id="er-poll" class="settings-input" type="number" min="15" title="Polling interval in seconds"><input id="er-concurrency" class="settings-input" type="number" min="1" title="Maximum simultaneous jobs"></div>
               <div class="settings-row"><label class="settings-label">Required subject prefix</label><input id="er-prefix" class="settings-input" placeholder="Optional, e.g. Research:"></div>
               <div class="settings-row"><label class="settings-label">Allowed addresses</label><textarea id="er-allowed-addresses" class="settings-select" rows="2" style="flex:1;resize:vertical" placeholder="client@example.com, peer@example.org"></textarea></div>
@@ -2008,7 +2011,7 @@
               <div class="settings-row"><label class="settings-label">Blocked patterns</label><textarea id="er-blocked" class="settings-select" rows="2" style="flex:1;resize:vertical" placeholder="no-reply, newsletter"></textarea></div>
               <div class="settings-row"><label class="settings-label">Request / attachment limits</label><input id="er-max-request" class="settings-input" type="number" min="100" title="Maximum request characters"><input id="er-max-attachment" class="settings-input" type="number" min="0" title="Maximum attachment bytes"></div>
               <div class="settings-row"><label class="settings-label">Daily limits</label><input id="er-sender-day" class="settings-input" type="number" min="1" title="Per sender"><input id="er-total-day" class="settings-input" type="number" min="1" title="Total jobs"></div>
-              <div class="settings-row"><label class="settings-label">Delivery / retry</label><input id="er-html-threshold" class="settings-input" type="number" min="1000" title="HTML attachment threshold, bytes"><input id="er-retry-limit" class="settings-input" type="number" min="0" title="Retry limit"><input id="er-timeout" class="settings-input" type="number" min="60" title="Research timeout, seconds"></div>
+              <div class="settings-row"><label class="settings-label">Delivery / retry</label><input id="er-html-threshold" class="settings-input" type="number" min="1000" title="Attachment threshold, bytes"><input id="er-retry-limit" class="settings-input" type="number" min="0" title="Retry limit"></div>
               <div class="settings-row"><label class="settings-label">Acknowledgement</label><textarea id="er-ack-template" class="settings-select" rows="3" style="flex:1;resize:vertical"></textarea></div>
               <div class="settings-row"><label class="settings-label">Final reply</label><textarea id="er-final-template" class="settings-select" rows="3" style="flex:1;resize:vertical"></textarea></div>
               <div class="settings-row"><label class="settings-label">Attachments</label><label style="font-size:11px;display:flex;align-items:center;gap:6px"><input id="er-plain-attachments" type="checkbox"> Allow plain-text attachments</label></div>
@@ -2025,7 +2028,7 @@
             <div id="er-job-counts" style="font-size:11px;opacity:.72;margin:8px 0"></div>
             <div style="overflow:auto;max-height:330px">
               <table style="width:100%;border-collapse:collapse;font-size:10px">
-                <thead><tr style="text-align:left;opacity:.6"><th>State</th><th>Sender / subject</th><th>Updated</th><th>Retry / error</th><th></th></tr></thead>
+                <thead><tr style="text-align:left;opacity:.6"><th>State</th><th>Sender / subject</th><th>Updated</th><th>Progress / error</th><th></th></tr></thead>
                 <tbody id="er-jobs-body"><tr><td colspan="5" style="padding:12px;opacity:.5">No jobs loaded</td></tr></tbody>
               </table>
             </div>

@@ -9,6 +9,9 @@ pydantic-settings>=2.14.1
 SQLAlchemy
 pypdf
 beautifulsoup4
+# Semantic HTML-to-Markdown conversion for downloadable email research reports.
+# The HTML is parsed and sanitized before conversion.
+markdownify
 charset-normalizer
 numpy
 # Vector store + local embeddings for RAG, semantic memory, and tool

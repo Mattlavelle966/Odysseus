@@ -60,11 +60,16 @@ DEFAULT_SETTINGS = {
             "Reference: {{job_reference}}"
         ),
         "final_email_template": (
-            "Research is complete. A concise summary and the full report follow."
+            "Research is complete. A concise summary is below and the full "
+            "report is attached."
         ),
         "html_attachment_threshold": 200000,
         "retry_limit": 5,
+        "research_depth_preset": "standard",
+        "research_rounds": 3,
+        "research_source_limit": 30,
         "research_timeout_seconds": 1800,
+        "early_stop_no_useful_findings": True,
         "allow_plain_text_attachments": True,
         "server_research_instruction": (
             "Produce a readable report with an executive summary, key findings, "
