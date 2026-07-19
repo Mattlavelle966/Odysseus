@@ -1,5 +1,6 @@
 import asyncio
 import json
+from types import SimpleNamespace
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -90,6 +91,72 @@ def test_reasoning_content_is_never_promoted_to_normal_content():
     assert ORNITH_PROFILE.normal_content(
         {"content": None, "reasoning_content": "secret"}
     ) == ""
+
+
+def test_ornith_document_context_accepts_orm_objects():
+    active_document = SimpleNamespace(
+        id="doc-orm",
+        version_count=7,
+        title="Website",
+        language="html",
+    )
+    instruction = ORNITH_PROFILE.agent_instruction(
+        objective="Make the header clearer",
+        allowed_names=["edit_document"],
+        terminal_state="the document edit is stored",
+        active_document=active_document,
+    )
+
+    assert "Active document id: doc-orm" in instruction
+    assert "Version: 7" in instruction
+
+    edit_schema = {
+        "type": "function",
+        "function": {
+            "name": "edit_document",
+            "description": "legacy",
+            "parameters": {"type": "object"},
+        },
+    }
+    adapted = ORNITH_PROFILE.adapt_tool_schemas(
+        [edit_schema],
+        allowed_names={"edit_document"},
+        active_document=active_document,
+    )[0]
+    properties = adapted["function"]["parameters"]["properties"]
+
+    assert properties["document_id"]["const"] == "doc-orm"
+    assert properties["expected_version"]["const"] == 7
+
+
+def test_ornith_v2_request_updates_same_document_history():
+    request = "Implement those changes, and create a v2 version of the doc"
+
+    assert ORNITH_PROFILE.document_tools_for_objective(request) == {
+        "update_document"
+    }
+    instruction = ORNITH_PROFILE.agent_instruction(
+        objective=request,
+        allowed_names=["update_document"],
+        terminal_state="the next document version is stored",
+        active_document=SimpleNamespace(id="doc-v1", version_count=1),
+    )
+
+    assert "exact same id" in instruction
+    assert "next immutable version" in instruction
+    assert "do not create a second document" in instruction
+    assert ORNITH_PROFILE.document_tools_for_objective(
+        "Create a separate document copy"
+    ) == {"create_document"}
+    assert ORNITH_PROFILE.document_tools_for_objective(
+        "Create a new version of the document"
+    ) == {"update_document"}
+    assert ORNITH_PROFILE.document_tools_for_objective(
+        "Replace the entire document"
+    ) == {"update_document"}
+    assert ORNITH_PROFILE.document_tools_for_objective(
+        "Change the heading"
+    ) == {"edit_document"}
 
 
 def test_endpoint_diagnostic_requires_a_real_harmless_tool_call(monkeypatch):

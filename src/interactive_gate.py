@@ -197,7 +197,16 @@ async def wait_for_interactive_quiet(label: str = "") -> bool:
                 if remaining <= 0:
                     return waited
                 timeout = min(timeout, remaining)
-            try:
-                await asyncio.wait_for(cond.wait(), timeout=timeout)
-            except asyncio.TimeoutError:
-                pass
+
+        # Do not wrap Condition.wait() in wait_for() here. Foreground traffic
+        # cancels scheduled tasks deliberately, and cancellation can race
+        # wait_for's internal waiter while Condition.wait() is reacquiring its
+        # lock. That race leaves the shared condition locked (or raises
+        # "Lock is not acquired"), after which every request blocks in
+        # track_interactive_request and the UI sits on its loading screen.
+        #
+        # Polling outside the lock keeps cancellation safe and still reacts
+        # within at most 250 ms, which is well below the foreground quiet
+        # window. Activity writers continue to notify the condition for
+        # compatibility, but this waiter never owns it across an await.
+        await asyncio.sleep(timeout)

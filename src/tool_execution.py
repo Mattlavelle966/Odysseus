@@ -1012,9 +1012,16 @@ def format_tool_result(description: str, result: Dict) -> str:
         if action == "create":
             parts.append(f"Document created: \"{result.get('title', '')}\" (id: {result['doc_id']}, v{result['version']})")
         elif action == "update":
-            parts.append(f"Document updated: \"{result.get('title', '')}\" (v{result['version']})")
+            parts.append(
+                f"Document updated: \"{result.get('title', '')}\" "
+                f"(id: {result['doc_id']}, v{result['version']})"
+            )
         elif action == "edit":
-            parts.append(f'Document edited: "{result.get("title", "")}" (v{result.get("version", "?")}, {result.get("applied", 0)} edit(s) applied)')
+            parts.append(
+                f'Document edited: "{result.get("title", "")}" '
+                f'(id: {result["doc_id"]}, v{result.get("version", "?")}, '
+                f'{result.get("applied", 0)} edit(s) applied)'
+            )
     elif "error" in result:
         parts.append(f"**Error:** {result['error']}")
 

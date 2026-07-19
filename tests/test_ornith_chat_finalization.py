@@ -13,6 +13,7 @@ import core.session_manager as session_manager_module
 import src.agent_loop as agent_loop
 from core.models import ChatMessage
 from routes.chat_helpers import save_assistant_response
+from types import SimpleNamespace
 
 
 @pytest.mark.asyncio
@@ -153,3 +154,197 @@ def test_ornith_missing_tool_calls_is_a_normal_text_terminal_response():
     assert blocks == []
     assert used_native is False
     assert converted == []
+
+
+def test_active_html_site_edit_targets_the_open_document():
+    document = SimpleNamespace(
+        id="doc-site",
+        title="Company site",
+        language="html",
+        current_content="<html></html>",
+        version_count=2,
+    )
+    prompt = (
+        "Please complete the site so all menu buttons work and make the logo "
+        "a centered background image."
+    )
+    intent = agent_loop._classify_agent_request([], prompt)
+
+    assert agent_loop._turn_targets_active_document(
+        intent, prompt, document
+    ) is True
+
+
+@pytest.mark.asyncio
+async def test_ornith_document_write_ends_from_stored_result(monkeypatch):
+    calls = 0
+    active_document = SimpleNamespace(
+        id="doc-site",
+        title="Company site",
+        language="html",
+        current_content="<html>v1</html>",
+        version_count=1,
+    )
+
+    monkeypatch.setattr(
+        agent_loop,
+        "get_setting",
+        lambda key, default=None: default,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        agent_loop, "get_mcp_manager", lambda: None, raising=False
+    )
+    monkeypatch.setattr(
+        agent_loop, "estimate_tokens", lambda *args, **kwargs: 10, raising=False
+    )
+
+    async def fake_stream(_candidates, messages, **kwargs):
+        nonlocal calls
+        calls += 1
+        yield "data: " + json.dumps({"delta": "I will update it now."}) + "\n\n"
+        yield "data: " + json.dumps({
+            "type": "tool_calls",
+            "calls": [{
+                "id": "call-update",
+                "name": "update_document",
+                "arguments": json.dumps({
+                    "document_id": "doc-site",
+                    "expected_version": 1,
+                    "content": "<html>v2</html>",
+                }),
+            }],
+        }) + "\n\n"
+        yield "data: [DONE]\n\n"
+
+    async def fake_execute(block, *args, **kwargs):
+        assert block.tool_type == "update_document"
+        return "update_document", {
+            "action": "update",
+            "result": "success",
+            "doc_id": "doc-site",
+            "title": "Company site",
+            "language": "html",
+            "content": "<html>v2</html>",
+            "version": 2,
+        }
+
+    monkeypatch.setattr(
+        agent_loop, "stream_llm_with_fallback", fake_stream, raising=False
+    )
+    monkeypatch.setattr(
+        agent_loop, "execute_tool_block", fake_execute, raising=False
+    )
+
+    chunks = [
+        chunk
+        async for chunk in agent_loop.stream_agent_loop(
+            "http://llama.cpp.test/v1/chat/completions",
+            "Ornith-1.0-35B",
+            [{
+                "role": "user",
+                "content": "Implement those changes as v2 of this document.",
+            }],
+            active_document=active_document,
+            session_id="session-site",
+            owner="alice",
+            max_rounds=3,
+            relevant_tools={
+                "create_document", "update_document", "edit_document"
+            },
+        )
+    ]
+
+    visible = []
+    metrics = {}
+    for chunk in chunks:
+        if not chunk.startswith("data: ") or chunk == "data: [DONE]\n\n":
+            continue
+        event = json.loads(chunk[6:])
+        if "delta" in event and not event.get("thinking"):
+            visible.append(event["delta"])
+        if event.get("type") == "metrics":
+            metrics = event["data"]
+
+    final_text = "".join(visible)
+    assert calls == 1
+    assert "I will update it now" not in final_text
+    assert "as version 2 in the same document history" in final_text
+    assert "#document-doc-site" in final_text
+    assert metrics["tool_events"][0]["doc_id"] == "doc-site"
+    assert metrics["tool_events"][0]["doc_version"] == 2
+    assert metrics["tool_events"][0]["success"] is True
+
+
+@pytest.mark.asyncio
+async def test_ornith_document_prose_cannot_claim_unsaved_success(monkeypatch):
+    calls = 0
+    active_document = SimpleNamespace(
+        id="doc-site",
+        title="Company site",
+        language="html",
+        current_content="<html>v1</html>",
+        version_count=1,
+    )
+
+    monkeypatch.setattr(
+        agent_loop,
+        "get_setting",
+        lambda key, default=None: default,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        agent_loop, "get_mcp_manager", lambda: None, raising=False
+    )
+    monkeypatch.setattr(
+        agent_loop, "estimate_tokens", lambda *args, **kwargs: 10, raising=False
+    )
+
+    async def fake_stream(_candidates, messages, **kwargs):
+        nonlocal calls
+        calls += 1
+        yield "data: " + json.dumps({
+            "delta": "Done! The site was updated successfully."
+        }) + "\n\n"
+        yield "data: [DONE]\n\n"
+
+    monkeypatch.setattr(
+        agent_loop, "stream_llm_with_fallback", fake_stream, raising=False
+    )
+
+    chunks = [
+        chunk
+        async for chunk in agent_loop.stream_agent_loop(
+            "http://llama.cpp.test/v1/chat/completions",
+            "Ornith-1.0-35B",
+            [{
+                "role": "user",
+                "content": "Complete the site and fix its menu buttons.",
+            }],
+            active_document=active_document,
+            session_id="session-site",
+            owner="alice",
+            max_rounds=3,
+            relevant_tools={"edit_document"},
+        )
+    ]
+
+    visible = []
+    metrics = {}
+    for chunk in chunks:
+        if not chunk.startswith("data: ") or chunk == "data: [DONE]\n\n":
+            continue
+        event = json.loads(chunk[6:])
+        if "delta" in event and not event.get("thinking"):
+            visible.append(event["delta"])
+        if event.get("type") == "metrics":
+            metrics = event["data"]
+
+    final_text = "".join(visible)
+    assert calls == 2
+    assert "updated successfully" not in final_text
+    assert final_text == (
+        "I could not save the requested document change. "
+        "The active document is unchanged."
+    )
+    assert metrics.get("tool_events") in (None, [])

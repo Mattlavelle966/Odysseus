@@ -1137,11 +1137,24 @@ function resolveDocumentPlaceholderLinks(text, metadata) {
   if (!text || !metadata || !Array.isArray(metadata.tool_events)) return text;
   const docEvents = metadata.tool_events.filter(ev => ev && ev.doc_id);
   if (!docEvents.length) return text;
-  return String(text).replace(/#document-(\d+)\b/g, (match, num) => {
+  let resolved = String(text).replace(/#document-(\d+)\b/g, (match, num) => {
     const idx = Number(num) - 1;
     const ev = Number.isInteger(idx) && idx >= 0 ? docEvents[idx] : null;
     return ev && ev.doc_id ? `#document-${ev.doc_id}` : match;
   });
+  // If exactly one real document was written in this assistant turn, it is
+  // the authoritative link target. Local models sometimes copy the active
+  // document's old UUID into their final prose even though the tool result
+  // returned a different id. Resolve that stale UUID from persisted tool
+  // metadata on both live-history rebuild and reload.
+  const uniqueDocIds = [...new Set(docEvents.map(ev => String(ev.doc_id || '')).filter(Boolean))];
+  if (uniqueDocIds.length === 1) {
+    resolved = resolved.replace(
+      /#document-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi,
+      `#document-${uniqueDocIds[0]}`,
+    );
+  }
+  return resolved;
 }
 
 // Jump-to-entity anchors — the agent emits links like

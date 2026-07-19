@@ -10,6 +10,7 @@ from __future__ import annotations
 import copy
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Optional
 
@@ -24,6 +25,15 @@ _PSEUDO_TOOL_RE = re.compile(
     r"```(?:json|tool|function)[^\n]*\n)"
 )
 _DOC_TOOLS = {"create_document", "edit_document", "update_document"}
+
+
+def _document_value(document: Any, field: str, default: Any = None) -> Any:
+    """Read document context from either API dictionaries or ORM objects."""
+    if document is None:
+        return default
+    if isinstance(document, Mapping):
+        return document.get(field, default)
+    return getattr(document, field, default)
 
 
 @dataclass
@@ -73,6 +83,9 @@ class ModelProfile:
     def correction_message(self, schemas: list[dict], errors: list[str]) -> str:
         return ""
 
+    def document_tools_for_objective(self, objective: str) -> set[str]:
+        return set(_DOC_TOOLS)
+
     def normal_content(self, message: dict) -> str:
         return message.get("content") or message.get("reasoning_content") or ""
 
@@ -108,7 +121,7 @@ class OrnithProfile(ModelProfile):
 
     @staticmethod
     def _document_schema(
-        name: str, schema: dict, active_document: Optional[dict]
+        name: str, schema: dict, active_document: Any
     ) -> dict:
         fn = schema["function"]
         if name == "create_document":
@@ -119,8 +132,10 @@ class OrnithProfile(ModelProfile):
             )
             return schema
 
-        doc_id = str((active_document or {}).get("id") or "")
-        version = int((active_document or {}).get("version_count") or 0)
+        doc_id = str(_document_value(active_document, "id", "") or "")
+        version = int(
+            _document_value(active_document, "version_count", 0) or 0
+        )
         if name == "update_document":
             fn["description"] = (
                 f"Replace the complete active document {doc_id!r}. "
@@ -188,6 +203,44 @@ class OrnithProfile(ModelProfile):
         }
         return schema
 
+    def document_tools_for_objective(self, objective: str) -> set[str]:
+        request = str(objective or "").lower()
+        explicitly_separate_document = bool(
+            re.search(
+                r"\b(create|make|save|duplicate|copy)\b.{0,60}"
+                r"\b(separate|another|new)\s+(?:doc|document|file|copy)\b",
+                request,
+            )
+            or re.search(
+                r"\b(separate|another)\s+(?:copy|doc|document|file)\b",
+                request,
+            )
+        )
+        if explicitly_separate_document:
+            return {"create_document"}
+        # A "v2", "new version", or "next revision" belongs to the immutable
+        # version history of the active document. update_document replaces the
+        # current contents under the same document id and stores the next
+        # DocumentVersion row atomically.
+        if re.search(
+            r"\b(v\d+(?:\.\d+)?|new\s+version|next\s+(?:version|revision)|"
+            r"version\s+\d+|revision\s+\d+)\b",
+            request,
+        ):
+            return {"update_document"}
+        if re.search(
+            r"\b(create|make|start)\b.{0,30}\b(new\s+)?document\b",
+            request,
+        ):
+            return {"create_document"}
+        if re.search(
+            r"\b(replace|rewrite|overwrite)\b.{0,40}"
+            r"\b(entire|complete|whole|all)\b",
+            request,
+        ):
+            return {"update_document"}
+        return {"edit_document"}
+
     def agent_instruction(
         self,
         *,
@@ -199,10 +252,32 @@ class OrnithProfile(ModelProfile):
         tools = ", ".join(str(name) for name in allowed_names) or "(none)"
         doc = ""
         if active_document:
+            doc_id = _document_value(active_document, "id", "")
+            version = _document_value(active_document, "version_count", 0)
             doc = (
-                f"\nActive document id: {active_document.get('id')}. "
-                f"Version: {active_document.get('version_count', 0)}."
+                f"\nActive document id: {doc_id}. "
+                f"Version: {version}."
             )
+            allowed = set(allowed_names)
+            if "create_document" in allowed and not (
+                {"edit_document", "update_document"} & allowed
+            ):
+                doc += (
+                    "\nCreate a separate document from the active document "
+                    "context. Preserve the active document unchanged."
+                )
+            elif "update_document" in allowed:
+                doc += (
+                    "\nReplace the active document under this exact same id. "
+                    "A successful update creates the next immutable version in "
+                    "its version history; do not create a second document."
+                )
+            elif "edit_document" in allowed:
+                doc += (
+                    "\nEdit the active document under this exact same id. A "
+                    "successful edit creates the next immutable version in its "
+                    "version history."
+                )
         return (
             "ORNITH OPERATION MODE\n"
             f"Objective: {objective.strip()[:1200]}\n"

@@ -1137,6 +1137,27 @@ def _turn_targets_active_document(intent: Dict[str, object], last_user: str, act
         text,
     ):
         return True
+    # Code/HTML documents are commonly referred to by what they render ("the
+    # site", "menu", "page") rather than as a document. When one is explicitly
+    # open, an edit verb plus an artifact/UI term is strong enough to retain the
+    # document context and its write tools. This does not affect turns with no
+    # active editor document.
+    if re.search(
+        r"\b(?:make|change|update|fix|edit|rewrite|rework|revise|replace|"
+        r"remove|delete|add|append|insert|set|turn|finish|complete|implement)\b"
+        r".{0,140}\b(?:site|website|webpage|page|code|script|app|program|"
+        r"file|menu|navigation|nav|button|logo|layout|theme|style|css|html|"
+        r"javascript|typescript)\b",
+        text,
+    ) or re.search(
+        r"\b(?:site|website|webpage|page|code|script|app|program|file|menu|"
+        r"navigation|nav|button|logo|layout|theme|style|css|html|javascript|"
+        r"typescript)\b.{0,140}\b(?:make|change|update|fix|edit|rewrite|"
+        r"rework|revise|replace|remove|delete|add|append|insert|set|turn|"
+        r"finish|complete|implement)\b",
+        text,
+    ):
+        return True
     if re.search(
         r"\b(?:make it|make this|expand it|expand this|extend it|extend this|continue it|continue this)\b.*\b(?:longer|shorter|bigger|smaller|more detailed|more concise|expanded|extended)?\b",
         text,
@@ -2410,6 +2431,34 @@ def _build_actions_snapshot(tool_events: list, limit: int = 8000) -> str:
     return snap[:limit] if len(snap) > limit else snap
 
 
+def _successful_document_result(tool_name: str, result: dict) -> bool:
+    """Require a stored document transition, not merely a tool-shaped result."""
+    return bool(
+        tool_name in {"create_document", "update_document", "edit_document"}
+        and isinstance(result, dict)
+        and not result.get("error")
+        and result.get("result") == "success"
+        and result.get("action") in {"create", "update", "edit"}
+        and result.get("doc_id")
+        and isinstance(result.get("version"), int)
+        and result["version"] > 0
+    )
+
+
+def _document_result_confirmation(result: dict) -> str:
+    """Build the canonical link from the stored tool result, never model prose."""
+    title = str(result.get("title") or "Document").replace("[", "").replace("]", "")
+    doc_id = str(result.get("doc_id") or "")
+    version = int(result.get("version") or 0)
+    if result.get("action") == "create":
+        verb = "Created"
+        suffix = ""
+    else:
+        verb = "Saved"
+        suffix = " in the same document history"
+    return f'{verb} **[{title}](#document-{doc_id})** as version {version}{suffix}.'
+
+
 async def _run_verifier_subagent(
     instruction: str, actions_snapshot: str,
     *, endpoint_url: str, model: str, headers: dict,
@@ -3104,16 +3153,13 @@ async def stream_agent_loop(
                 "create_document", "edit_document", "update_document",
                 "ask_user", "update_plan",
             }
-            _doc_request = _last_user.lower()
-            if re.search(r"\b(create|make|start)\b.{0,30}\b(new )?document\b", _doc_request):
-                _ornith_allowed -= {"edit_document", "update_document"}
-            elif re.search(
-                r"\b(replace|rewrite|overwrite)\b.{0,40}\b(entire|complete|whole|all)\b",
-                _doc_request,
-            ):
-                _ornith_allowed -= {"create_document", "edit_document"}
-            else:
-                _ornith_allowed -= {"create_document", "update_document"}
+            _requested_doc_tools = _model_profile.document_tools_for_objective(
+                _last_user
+            )
+            _ornith_allowed -= (
+                {"create_document", "edit_document", "update_document"}
+                - _requested_doc_tools
+            )
         _ornith_allowed_names_for_turn = set(_ornith_allowed)
         _ornith_instruction = _model_profile.agent_instruction(
             objective=_last_user,
@@ -3311,6 +3357,16 @@ async def stream_agent_loop(
     )
     _awaiting_user = False  # set by ask_user → end the turn and wait for a choice
     _ornith_correction_used = False
+    _ornith_document_action_nudged = False
+    _ornith_document_result = None
+    _ornith_document_write_required = bool(
+        _ornith_profile
+        and _active_document_relevant
+        and (
+            {"create_document", "update_document", "edit_document"}
+            & set(_ornith_allowed_names_for_turn or ())
+        )
+    )
 
     # Document streaming state (persists across rounds)
     _doc_acc = ""          # accumulated tool-call JSON arguments
@@ -3571,10 +3627,15 @@ async def stream_agent_loop(
                                 else data["delta"]
                             )
                             round_response += _delta_text
-                            full_response += _delta_text
+                            if not _ornith_document_write_required:
+                                full_response += _delta_text
                             data["delta"] = _delta_text
                         if (
                             (not _ody_qwen_finetune_model or data.get("thinking"))
+                            and not (
+                                _ornith_document_write_required
+                                and not data.get("thinking")
+                            )
                             and not (
                                 _ornith_profile
                                 and data.get("thinking")
@@ -3870,11 +3931,48 @@ async def stream_agent_loop(
         # persisted text either — otherwise it streams once and then disappears
         # on reload (#3222 follow-up).
         cleaned_round = strip_tool_blocks(round_response, skip_fenced=(_is_api_model and not used_native and not guide_only)).strip()
-        round_texts.append(cleaned_round)
+        round_texts.append(
+            "" if _ornith_document_write_required else cleaned_round
+        )
         if _ody_qwen_finetune_model and not tool_blocks and cleaned_round:
             yield f'data: {json.dumps({"delta": cleaned_round})}\n\n'
 
         if not tool_blocks:
+            # Ornith document operations are side effects. Text such as "the
+            # site is updated" is not completion unless a document tool
+            # returned a persisted id/version transition. Retry once with the
+            # already-offered schema; if it still refuses, report the unchanged
+            # state plainly instead of accepting a fabricated success.
+            if (
+                _ornith_document_write_required
+                and _ornith_document_result is None
+                and not _force_answer
+            ):
+                if not _ornith_document_action_nudged and all_tool_schemas:
+                    _ornith_document_action_nudged = True
+                    messages.append({
+                        "role": "system",
+                        "content": (
+                            "No document write was stored. Do not claim success "
+                            "or print a document link. Call exactly one offered "
+                            "document function now. Completion requires its "
+                            "result to contain the active document id and a new "
+                            "stored version number."
+                        ),
+                    })
+                    logger.info(
+                        "[ornith-profile] retrying document turn with no stored write"
+                    )
+                    yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1, "reason": "ornith_document_write_required"})}\n\n'
+                    continue
+                _failure = (
+                    "I could not save the requested document change. "
+                    "The active document is unchanged."
+                )
+                full_response = _failure
+                round_texts[-1] = _failure
+                yield f'data: {json.dumps({"delta": _failure})}\n\n'
+                break
             # ── Completion verifier (mechanism 3a) ────────────────────
             # The model is finishing. If this was an effectful agentic turn,
             # have a fresh-context verifier independently check the work
@@ -4487,6 +4585,7 @@ async def stream_agent_loop(
                 "command": cmd_display,
                 "output": output_text,
                 "exit_code": result.get("exit_code"),
+                "success": tool_succeeded,
             }
             if result.get("image_url"):
                 for ik in ("image_url", "image_prompt", "image_model", "image_size", "image_quality"):
@@ -4495,6 +4594,8 @@ async def stream_agent_loop(
             if result.get("doc_id"):
                 tool_event["doc_id"] = result["doc_id"]
                 tool_event["doc_title"] = result.get("title", "")
+                tool_event["doc_action"] = result.get("action")
+                tool_event["doc_version"] = result.get("version")
             # Persist the file-write/edit diff so it re-renders on reload — without
             # this the diff shows live but vanishes from saved history.
             if result.get("diff"):
@@ -4505,6 +4606,10 @@ async def stream_agent_loop(
                 # message removes it as answered.
                 tool_event["ask_user"] = _pending_ask_user_event
             tool_events.append(tool_event)
+            if _ornith_profile and _successful_document_result(
+                block.tool_type, result
+            ):
+                _ornith_document_result = dict(result)
             if block.tool_type in _VERIFIER_EFFECTFUL_TOOLS:
                 _effectful_used = True
 
@@ -4533,6 +4638,25 @@ async def stream_agent_loop(
         # arrives as the next message and the agent resumes from there. The
         # question text is already in the streamed response, so it persists.
         if _awaiting_user:
+            break
+
+        if _ornith_document_result is not None:
+            # End from the database-confirmed tool result. Asking Ornith for an
+            # extra prose round made it invent stale document ids and sometimes
+            # claim edits that never happened.
+            _confirmation = _document_result_confirmation(
+                _ornith_document_result
+            )
+            full_response = _confirmation
+            if round_texts:
+                round_texts[-1] = _confirmation
+            yield f'data: {json.dumps({"delta": _confirmation})}\n\n'
+            logger.info(
+                "[ornith-profile] document operation confirmed doc_id=%s version=%s action=%s",
+                _ornith_document_result.get("doc_id"),
+                _ornith_document_result.get("version"),
+                _ornith_document_result.get("action"),
+            )
             break
 
         if _doc_stream_create_completed:
@@ -4584,6 +4708,17 @@ async def stream_agent_loop(
     if _exhausted_rounds:
         logger.info("[agent] round cap (%d) reached mid-task — emitting rounds_exhausted", max_rounds)
         yield f'data: {json.dumps({"type": "rounds_exhausted", "rounds": max_rounds})}\n\n'
+
+    if _ornith_document_write_required and _ornith_document_result is None:
+        _failure = (
+            "I could not save the requested document change. "
+            "The active document is unchanged."
+        )
+        if _failure not in full_response:
+            full_response = _failure
+            if round_texts:
+                round_texts[-1] = _failure
+            yield f'data: {json.dumps({"delta": _failure})}\n\n'
 
     # If the response is completely empty and no tools were executed,
     # yield a fallback message so the user is not left hanging.
