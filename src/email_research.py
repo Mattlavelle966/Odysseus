@@ -69,6 +69,10 @@ JOB_STATES = {
 TERMINAL_STATES = {"delivered", "failed", "rejected", "cancelled"}
 AUTOMATION_HEADER = "X-Odysseus-Automation"
 AUTOMATION_VALUE = "email-deep-research-v1"
+SYPHERDYNE_LOGO_URL = (
+    "https://dropadox.sytes.net/api/public/preview/"
+    "0da408ef-f104-4da7-bd95-0ed9a492e2f2/233"
+)
 RESEARCH_DEPTH_PRESETS = {
     "quick": {"rounds": 2, "sources": 12, "timeout_seconds": 600},
     "standard": {"rounds": 3, "sources": 30, "timeout_seconds": 1800},
@@ -209,10 +213,14 @@ def _safe_html(raw_html: str) -> str:
         "a", "p", "br", "hr", "strong", "em", "b", "i", "u", "s", "blockquote",
         "code", "pre", "ul", "ol", "li", "h1", "h2", "h3", "h4", "h5", "h6",
         "table", "thead", "tbody", "tr", "th", "td", "details", "summary", "div",
-        "span",
+        "span", "img", "figure", "figcaption",
     }
     attrs = {
         "a": {"href", "title"},
+        "img": {
+            "src", "alt", "title", "width", "height", "loading",
+            "decoding", "referrerpolicy",
+        },
         "th": {"colspan", "rowspan"},
         "td": {"colspan", "rowspan"},
     }
@@ -272,29 +280,222 @@ def render_report_html(report: str) -> str:
 
 
 def report_to_html_document(report: str) -> str:
-    """Create a self-contained, browser-renderable report attachment."""
+    """Create a polished, browser-renderable Sypherdyne report attachment."""
     fragment = render_report_html(report)
+    generated_date = datetime.now(timezone.utc).strftime("%B %d, %Y")
     return f"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Odysseus Research Report</title>
+<meta name="color-scheme" content="light">
+<title>Sypherdyne Systems Research Report</title>
 <style>
-:root {{ color-scheme: light dark; }}
-body {{ font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; line-height: 1.6; margin: 0; }}
-main {{ max-width: 960px; margin: 0 auto; padding: 2rem; }}
-table {{ border-collapse: collapse; width: 100%; margin: 1rem 0; }}
-th, td {{ border: 1px solid #8888; padding: .5rem; text-align: left; vertical-align: top; }}
-pre {{ overflow-x: auto; padding: 1rem; background: #8882; }}
-blockquote {{ border-left: .25rem solid #8888; margin-left: 0; padding-left: 1rem; }}
-a {{ overflow-wrap: anywhere; }}
+:root {{
+  --ink: #17202b;
+  --muted: #5c6675;
+  --paper: #ffffff;
+  --canvas: #eef1f5;
+  --line: #dfe3e8;
+  --brand: #e3182d;
+  --brand-dark: #a90f20;
+}}
+* {{ box-sizing: border-box; }}
+html {{ background: var(--canvas); }}
+body {{
+  color: var(--ink);
+  background: var(--canvas);
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", sans-serif;
+  line-height: 1.7;
+  margin: 0;
+}}
+.document {{
+  background: var(--paper);
+  box-shadow: 0 20px 55px rgba(16, 24, 40, .12);
+  margin: 2.5rem auto;
+  max-width: 1040px;
+}}
+.brand-header {{
+  align-items: center;
+  background:
+    linear-gradient(120deg, rgba(227, 24, 45, .18), transparent 48%),
+    #050608;
+  border-bottom: 5px solid var(--brand);
+  color: #fff;
+  display: flex;
+  gap: 2.25rem;
+  justify-content: space-between;
+  min-height: 260px;
+  overflow: hidden;
+  padding: 2.5rem 3.5rem;
+  position: relative;
+}}
+.brand-header::after {{
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,.08));
+  content: "";
+  inset: 0;
+  pointer-events: none;
+  position: absolute;
+  transform: skewX(-18deg) translateX(72%);
+}}
+.brand-logo {{
+  display: block;
+  height: auto;
+  max-width: 310px;
+  object-fit: contain;
+  position: relative;
+  width: 36%;
+  z-index: 1;
+}}
+.brand-copy {{ max-width: 520px; position: relative; z-index: 1; }}
+.eyebrow {{
+  color: #ff6a78;
+  font-size: .76rem;
+  font-weight: 800;
+  letter-spacing: .2em;
+  margin: 0 0 .75rem;
+  text-transform: uppercase;
+}}
+.brand-copy h1 {{
+  color: #fff;
+  font-size: clamp(2rem, 5vw, 3.4rem);
+  letter-spacing: -.035em;
+  line-height: 1.05;
+  margin: 0;
+}}
+.report-meta {{
+  color: #c9ced6;
+  font-size: .88rem;
+  margin: 1.2rem 0 0;
+}}
+.report-content {{ padding: 3.5rem; }}
+.report-content > :first-child {{ margin-top: 0; }}
+.report-content h1 {{
+  border-bottom: 2px solid var(--brand);
+  font-size: 2.2rem;
+  line-height: 1.2;
+  padding-bottom: .65rem;
+}}
+.report-content h2 {{
+  border-left: 4px solid var(--brand);
+  font-size: 1.55rem;
+  line-height: 1.3;
+  margin-top: 2.6rem;
+  padding-left: .85rem;
+}}
+.report-content h3 {{ color: var(--brand-dark); margin-top: 2rem; }}
+.report-content p, .report-content li {{ max-width: 82ch; }}
+.report-content a {{
+  color: #b10f22;
+  overflow-wrap: anywhere;
+  text-decoration-thickness: .08em;
+  text-underline-offset: .16em;
+}}
+.report-content img {{
+  background: #f7f8fa;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(16, 24, 40, .10);
+  display: block;
+  height: auto;
+  margin: 1.5rem auto;
+  max-height: 620px;
+  max-width: 100%;
+  object-fit: contain;
+}}
+.report-content figure {{ margin: 2rem 0; }}
+.report-content figcaption {{
+  color: var(--muted);
+  font-size: .84rem;
+  margin-top: -.9rem;
+  text-align: center;
+}}
+.table-scroll {{ overflow-x: auto; }}
+table {{
+  border-collapse: separate;
+  border-spacing: 0;
+  box-shadow: 0 0 0 1px var(--line);
+  margin: 1.5rem 0;
+  overflow: hidden;
+  width: 100%;
+}}
+th {{
+  background: #171a20;
+  color: #fff;
+  font-size: .78rem;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}}
+th, td {{
+  border-bottom: 1px solid var(--line);
+  padding: .75rem .9rem;
+  text-align: left;
+  vertical-align: top;
+}}
+tr:nth-child(even) td {{ background: #f7f8fa; }}
+blockquote {{
+  background: #fff5f6;
+  border-left: .28rem solid var(--brand);
+  margin: 1.5rem 0;
+  padding: .85rem 1.2rem;
+}}
+pre {{
+  background: #11151b;
+  border-radius: 8px;
+  color: #e9edf2;
+  overflow-x: auto;
+  padding: 1rem 1.2rem;
+}}
+code {{
+  background: #eef0f3;
+  border-radius: 4px;
+  padding: .12em .35em;
+}}
+pre code {{ background: transparent; padding: 0; }}
+.document-footer {{
+  align-items: center;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  display: flex;
+  font-size: .78rem;
+  justify-content: space-between;
+  padding: 1.25rem 3.5rem;
+}}
+@media (max-width: 720px) {{
+  .document {{ margin: 0; }}
+  .brand-header {{ align-items: flex-start; flex-direction: column; padding: 2rem; }}
+  .brand-logo {{ max-width: 250px; width: 65%; }}
+  .report-content {{ padding: 2rem; }}
+  .document-footer {{ align-items: flex-start; flex-direction: column; gap: .35rem; padding: 1.25rem 2rem; }}
+}}
+@media print {{
+  html, body {{ background: #fff; }}
+  .document {{ box-shadow: none; margin: 0; max-width: none; }}
+  .brand-header {{ print-color-adjust: exact; -webkit-print-color-adjust: exact; }}
+  a {{ color: inherit; }}
+}}
 </style>
 </head>
 <body>
-<main>
-{fragment}
-</main>
+<article class="document">
+  <header class="brand-header">
+    <div class="brand-copy">
+      <p class="eyebrow">Sypherdyne Systems · Research Intelligence</p>
+      <h1>Deep Research Report</h1>
+      <p class="report-meta">Prepared {generated_date} · Evidence-led analysis</p>
+    </div>
+    <img class="brand-logo" src="{SYPHERDYNE_LOGO_URL}"
+      alt="Sypherdyne Systems" referrerpolicy="no-referrer">
+  </header>
+  <main class="report-content">
+    {fragment}
+  </main>
+  <footer class="document-footer">
+    <span>Prepared by Sypherdyne Systems</span>
+    <span>Deep Research · {generated_date}</span>
+  </footer>
+</article>
 </body>
 </html>
 """
@@ -1213,6 +1414,27 @@ class EmailResearchWorker:
                     report = self._read_report(job.final_report_location)
                 if not report:
                     raise WorkflowError("Research report could not be retrieved")
+                get_visual_report = getattr(
+                    self.research_handler, "get_report_html", None
+                )
+                if callable(get_visual_report):
+                    try:
+                        visual_report = get_visual_report(
+                            job.research_session_id
+                        )
+                        if visual_report:
+                            report = visual_report
+                    except Exception:
+                        # Raw research remains a complete, safe fallback if the
+                        # optional visual renderer cannot build its richer
+                        # image-aware representation.
+                        _log_event(
+                            logging.WARNING,
+                            "email_research_visual_report_unavailable",
+                            job_id=job.id,
+                            account_id=job.email_account_id,
+                            research_id=job.research_session_id,
+                        )
                 await self._deliver_once(job, config, final=True, report=report)
                 self._mark_delivered(job.id)
                 return True, False

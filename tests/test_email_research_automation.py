@@ -39,6 +39,7 @@ class FakeResearch:
         self.starts = []
         self.states = {}
         self.reports = {}
+        self.visual_reports = {}
         self.on_complete = {}
         self.finish_requests = []
         self.cancel_requests = []
@@ -54,6 +55,9 @@ class FakeResearch:
 
     def get_result(self, session_id):
         return self.reports.get(session_id)
+
+    def get_report_html(self, session_id):
+        return self.visual_reports.get(session_id)
 
     def finish_research_now(self, session_id):
         if session_id not in self.states:
@@ -187,6 +191,15 @@ def test_full_mocked_lifecycle_is_exactly_once_and_threaded(workflow):
     assert research.starts[0]["early_stop_no_useful_findings"] is True
 
     research.complete(job.research_session_id)
+    research.visual_reports[job.research_session_id] = """
+    <!doctype html><html><head><style>body { color: purple; }</style></head>
+    <body><h1>Visual Report</h1>
+    <figure><img src="https://example.com/source-photo.jpg"
+      alt="Source photograph" onerror="alert(1)">
+    <figcaption>Source photograph</figcaption></figure>
+    <p>A finding with <a href="https://example.com">source</a>.</p>
+    </body></html>
+    """
     second = run(worker.run_cycle())
     assert second["ignored_or_duplicate"] == 1
     assert len(research.starts) == 1
@@ -204,7 +217,9 @@ def test_full_mocked_lifecycle_is_exactly_once_and_threaded(workflow):
     assert len(html_attachments) == 1
     assert '<a href="https://example.com"' in html_attachments[0]
     assert ">source</a>" in html_attachments[0]
-    assert "<h1>Report</h1>" in html_attachments[0]
+    assert "<h1>Visual Report</h1>" in html_attachments[0]
+    assert 'src="https://example.com/source-photo.jpg"' in html_attachments[0]
+    assert "onerror" not in html_attachments[0]
     delivered = all_jobs(Session)[0]
     assert delivered.state == "delivered"
     assert delivered.result_status == "success"
@@ -635,6 +650,11 @@ Duration: 10s
 <p>A useful result with <a href="https://example.com/source">evidence</a>.</p>
 <h2>Findings</h2>
 <ul><li>First finding</li><li>Second finding</li></ul>
+<figure>
+<img src="https://example.com/research-chart.png" alt="Research chart"
+  width="900" onerror="alert(2)">
+<figcaption>Research chart from a cited source.</figcaption>
+</figure>
 <table><thead><tr><th>Item</th><th>Value</th></tr></thead>
 <tbody><tr><td>Memory</td><td>32 GB</td></tr></tbody></table>
 </body>
@@ -657,9 +677,16 @@ Duration: 10s
     assert "<h2>Executive Summary</h2>" in rendered
     assert '<a href="https://example.com/source"' in rendered
     assert "<li>First finding</li>" in rendered
+    assert 'src="https://example.com/research-chart.png"' in rendered
+    assert 'alt="Research chart"' in rendered
+    assert "<figcaption>Research chart from a cited source.</figcaption>" in rendered
     assert "<table>" in rendered
     assert "<td>32 GB</td>" in rendered
+    assert er.SYPHERDYNE_LOGO_URL in rendered
+    assert "Sypherdyne Systems · Research Intelligence" in rendered
+    assert "--brand: #e3182d" in rendered
     assert "&lt;h1&gt;Safe report&lt;/h1&gt;" not in rendered
+    assert "onerror" not in rendered
     assert "<script" not in rendered
     assert "alert(1)" not in rendered
     assert "color: red" not in rendered
