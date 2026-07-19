@@ -226,18 +226,8 @@ def _safe_html(raw_html: str) -> str:
     )
 
 
-def render_report_html(report: str) -> str:
-    import markdown
-
-    rendered = markdown.markdown(
-        report or "",
-        extensions=["extra", "tables", "fenced_code", "sane_lists"],
-    )
-    return _safe_html(rendered)
-
-
-def _html_fragment_to_markdown(raw_html: str) -> str:
-    """Convert safe report body content to Markdown without CSS or document chrome."""
+def _sanitized_html_fragment(raw_html: str) -> str:
+    """Extract and sanitize body content without model-supplied document chrome."""
     soup = BeautifulSoup(raw_html or "", "html.parser")
     for node in soup.find_all(
         [
@@ -254,7 +244,65 @@ def _html_fragment_to_markdown(raw_html: str) -> str:
 
     root = soup.body if soup.body is not None else soup
     fragment = "".join(str(child) for child in root.contents)
-    safe_fragment = _safe_html(fragment)
+    return _safe_html(fragment)
+
+
+def render_report_html(report: str) -> str:
+    """Render Markdown, raw HTML, or fenced HTML as a safe HTML fragment."""
+    import markdown
+
+    source = str(report or "").replace("\r\n", "\n").replace("\r", "\n")
+    source = _FENCED_HTML_RE.sub(
+        lambda match: "\n\n"
+        + _sanitized_html_fragment(match.group("html"))
+        + "\n\n",
+        source,
+    )
+    source = _HTML_DOCUMENT_RE.sub(
+        lambda match: "\n\n"
+        + _sanitized_html_fragment(match.group(0))
+        + "\n\n",
+        source,
+    )
+    rendered = markdown.markdown(
+        source,
+        extensions=["extra", "tables", "fenced_code", "sane_lists"],
+    )
+    return _safe_html(rendered)
+
+
+def report_to_html_document(report: str) -> str:
+    """Create a self-contained, browser-renderable report attachment."""
+    fragment = render_report_html(report)
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Odysseus Research Report</title>
+<style>
+:root {{ color-scheme: light dark; }}
+body {{ font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; line-height: 1.6; margin: 0; }}
+main {{ max-width: 960px; margin: 0 auto; padding: 2rem; }}
+table {{ border-collapse: collapse; width: 100%; margin: 1rem 0; }}
+th, td {{ border: 1px solid #8888; padding: .5rem; text-align: left; vertical-align: top; }}
+pre {{ overflow-x: auto; padding: 1rem; background: #8882; }}
+blockquote {{ border-left: .25rem solid #8888; margin-left: 0; padding-left: 1rem; }}
+a {{ overflow-wrap: anywhere; }}
+</style>
+</head>
+<body>
+<main>
+{fragment}
+</main>
+</body>
+</html>
+"""
+
+
+def _html_fragment_to_markdown(raw_html: str) -> str:
+    """Convert safe report body content to Markdown without CSS or document chrome."""
+    safe_fragment = _sanitized_html_fragment(raw_html)
     converted = html_to_markdown(
         safe_fragment,
         heading_style="ATX",
@@ -744,19 +792,20 @@ def build_final_reply(
 ) -> email.message.Message:
     report_markdown = report_to_markdown(report)
     summary = concise_summary(report_markdown)
+    report_html = report_to_html_document(report)
     intro = config.final_email_template.replace("{{job_reference}}", job.id)
     plain = (
         f"{intro}\n\nExecutive summary\n\n{summary}\n\n"
-        "The complete research report is attached as report.md."
+        "The complete research report is attached as report.html."
     )
 
     msg = _base_message(
         job, from_address, _provider_message_id(job.final_delivery_idempotency_key)
     )
     msg.attach(MIMEText(plain, "plain", "utf-8"))
-    attachment = MIMEText(report_markdown, "markdown", "utf-8")
+    attachment = MIMEText(report_html, "html", "utf-8")
     attachment.add_header(
-        "Content-Disposition", "attachment", filename="report.md"
+        "Content-Disposition", "attachment", filename="report.html"
     )
     msg.attach(attachment)
     return msg

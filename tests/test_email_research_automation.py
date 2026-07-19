@@ -196,17 +196,15 @@ def test_full_mocked_lifecycle_is_exactly_once_and_threaded(workflow):
     assert "<older@example.com>" in final["References"]
     assert "<request-1@example.com>" in final["References"]
     assert final["X-Odysseus-Automation"] == er.AUTOMATION_VALUE
-    markdown_parts = [
+    html_attachments = [
         part.get_payload(decode=True).decode("utf-8")
         for part in final.walk()
-        if part.get_filename() == "report.md"
+        if part.get_filename() == "report.html"
     ]
-    assert len(markdown_parts) == 1
-    assert "source" in markdown_parts[0]
-    assert not any(
-        part.get_content_type() == "text/html"
-        for part in final.walk()
-    )
+    assert len(html_attachments) == 1
+    assert '<a href="https://example.com"' in html_attachments[0]
+    assert ">source</a>" in html_attachments[0]
+    assert "<h1>Report</h1>" in html_attachments[0]
     delivered = all_jobs(Session)[0]
     assert delivered.state == "delivered"
     assert delivered.result_status == "success"
@@ -608,7 +606,7 @@ def test_prompt_injection_is_delimited_and_never_becomes_an_application_action()
     assert er.rejection_reason(inbound, config, "research@example.test") is None
 
 
-def test_html_report_is_converted_to_downloadable_markdown_attachment():
+def test_report_is_a_safe_browser_renderable_html_attachment():
     config = er.EmailResearchConfig(html_attachment_threshold=10000)
     job = type("Job", (), {
         "id": "safe-job",
@@ -648,21 +646,23 @@ Duration: 10s
     parsed = message_from_bytes(raw)
     attachments = [
         part for part in parsed.walk()
-        if part.get_filename() == "report.md"
+        if part.get_filename() == "report.html"
     ]
     assert len(attachments) == 1
-    markdown = attachments[0].get_payload(decode=True).decode("utf-8")
-    assert "# Safe report" in markdown
-    assert "## Executive Summary" in markdown
-    assert "[evidence](https://example.com/source)" in markdown
-    assert "- First finding" in markdown
-    assert "| Item" in markdown
-    assert "32 GB" in markdown
-    assert "<script" not in markdown
-    assert "<style" not in markdown
-    assert "color: red" not in markdown
-    assert "<html" not in markdown
-    assert "<body" not in markdown
+    assert attachments[0].get_content_type() == "text/html"
+    assert attachments[0].get_content_disposition() == "attachment"
+    rendered = attachments[0].get_payload(decode=True).decode("utf-8")
+    assert rendered.lstrip().lower().startswith("<!doctype html>")
+    assert "<h1>Safe report</h1>" in rendered
+    assert "<h2>Executive Summary</h2>" in rendered
+    assert '<a href="https://example.com/source"' in rendered
+    assert "<li>First finding</li>" in rendered
+    assert "<table>" in rendered
+    assert "<td>32 GB</td>" in rendered
+    assert "&lt;h1&gt;Safe report&lt;/h1&gt;" not in rendered
+    assert "<script" not in rendered
+    assert "alert(1)" not in rendered
+    assert "color: red" not in rendered
 
     plain_parts = [
         part.get_payload(decode=True).decode("utf-8")
@@ -675,7 +675,3 @@ Duration: 10s
     assert "First finding" not in plain_parts[0]
     assert "<html" not in plain_parts[0]
     assert "color: red" not in plain_parts[0]
-    assert not any(
-        part.get_content_type() == "text/html"
-        for part in parsed.walk()
-    )
