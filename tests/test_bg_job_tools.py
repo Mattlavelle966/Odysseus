@@ -5,6 +5,7 @@ seeded "running" jobs stay running through refresh(), and _kill is stubbed so no
 real signal is sent. Jobs are scoped to a chat (session_id), which is the main
 invariant under test.
 """
+
 import asyncio
 import json
 import time
@@ -13,6 +14,40 @@ import pytest
 
 from src import bg_jobs
 from src.agent_tools.bg_job_tools import ManageBgJobsTool
+from src.agent_tools.subprocess_tools import (
+    BashTool,
+    _has_unmanaged_background_operator,
+)
+
+
+def test_unmanaged_trailing_shell_background_is_detected():
+    assert _has_unmanaged_background_operator(
+        "python3 -m http.server 8080 &"
+    )
+    assert not _has_unmanaged_background_operator(
+        "curl 'https://example.test/?a=1&b=2'"
+    )
+    assert not _has_unmanaged_background_operator("echo ok && echo done")
+
+
+@pytest.mark.asyncio
+async def test_bash_rejects_unmanaged_background_without_starting_process(
+    monkeypatch,
+):
+    async def fail_if_started(*args, **kwargs):
+        raise AssertionError("subprocess must not start")
+
+    monkeypatch.setattr(
+        "src.agent_tools.subprocess_tools.asyncio.create_subprocess_shell",
+        fail_if_started,
+    )
+    result = await BashTool().execute(
+        "python3 -m http.server 8080 &",
+        {"subproc_env": {}},
+    )
+
+    assert result["exit_code"] == 2
+    assert "#!bg" in result["error"]
 
 
 @pytest.fixture

@@ -41,6 +41,7 @@ NON_ADMIN_BLOCKED_TOOLS = BUILTIN_EMAIL_TOOLS | {
     "bash",
     "python",
     "manage_bg_jobs",
+    "agent_ide",
     "read_file",
     "write_file",
     "edit_file",
@@ -158,6 +159,7 @@ _PLAN_MODE_KNOWN_MUTATORS = {
     "bash", "python",
     # Controls shell processes (kill); plan mode can't run bash anyway.
     "manage_bg_jobs",
+    "agent_ide",
 }
 
 

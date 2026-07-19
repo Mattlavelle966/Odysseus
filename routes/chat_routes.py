@@ -168,6 +168,35 @@ def _resolve_request_workspace(request, raw_value) -> tuple:
     return workspace, (requested if not workspace else "")
 
 
+def _resolve_session_workspace(request, session_id: str) -> str:
+    """Return a durable /agentIDE workspace for an owned admin chat.
+
+    The stored value is never trusted blindly: the same privilege and path
+    vetting used for a posted workspace is applied on every turn.
+    """
+    if not session_id:
+        return ""
+    from src.tool_security import owner_is_admin_or_single_user
+    owner = get_current_user(request)
+    if not owner_is_admin_or_single_user(owner):
+        return ""
+    db = SessionLocal()
+    try:
+        query = db.query(DBSession.workspace_path).filter(
+            DBSession.id == session_id
+        )
+        if owner:
+            from src.auth_helpers import owner_filter
+            query = owner_filter(query, DBSession, owner)
+        row = query.first()
+    finally:
+        db.close()
+    if not row or not row.workspace_path:
+        return ""
+    from src.tool_execution import vet_workspace
+    return vet_workspace(row.workspace_path) or ""
+
+
 def _session_url_matches_endpoint(session_url: str, endpoint_base: str) -> bool:
     if not session_url or not endpoint_base:
         return False
@@ -573,6 +602,8 @@ def setup_chat_routes(
         workspace, workspace_rejected = _resolve_request_workspace(
             request, form_data.get("workspace")
         )
+        if not workspace and not workspace_rejected:
+            workspace = _resolve_session_workspace(request, str(session or ""))
         # Plan mode is a modifier on agent mode — it only makes sense with tools.
         if plan_mode:
             chat_mode = "agent"

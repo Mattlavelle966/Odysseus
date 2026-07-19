@@ -73,6 +73,13 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         is_document_pdf_preview = path.startswith("/api/document/") and path.endswith("/render-pdf")
         # Visual report pages are self-contained HTML — need inline scripts + external images
         is_report = path.startswith("/api/research/report/")
+        # AgentIDE renders untrusted project code in a sandboxed iframe. It
+        # needs its own scripts/styles and must be frameable by Odysseus, while
+        # the iframe intentionally lacks allow-same-origin/top-navigation.
+        is_agentide_preview = (
+            path.startswith("/api/agentide/")
+            and "/preview-token/" in path
+        )
 
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
@@ -85,7 +92,19 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         if is_https:
             response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
 
-        if is_report:
+        if is_agentide_preview:
+            response.headers["Content-Security-Policy"] = (
+                "default-src * data: blob:; "
+                "script-src * 'unsafe-inline' 'unsafe-eval' blob:; "
+                "style-src * 'unsafe-inline'; "
+                "img-src * data: blob:; "
+                "font-src * data:; "
+                "connect-src *; "
+                "media-src * data: blob:; "
+                "frame-src *; "
+                "frame-ancestors 'self'"
+            )
+        elif is_report:
             response.headers["Content-Security-Policy"] = (
                 "default-src 'self'; "
                 "script-src 'self' 'unsafe-inline'; "

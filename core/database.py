@@ -7,7 +7,7 @@ from typing import Optional
 from urllib.parse import unquote, urlparse
 from sqlalchemy import (
     event, create_engine, Column, String, Text, Boolean, DateTime, Integer,
-    ForeignKey, JSON, Index, UniqueConstraint, func, text,
+    ForeignKey, JSON, Index, UniqueConstraint, func, text, inspect,
 )
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.types import TypeDecorator
@@ -235,6 +235,10 @@ class Session(TimestampMixin, Base):
     total_output_tokens = Column(Integer, default=0)
     mode = Column(String, nullable=True)  # 'agent', 'chat', or 'research'
     crew_member_id = Column(String, nullable=True)  # links to crew_members.id
+    # A workspace selected with /agentIDE is durable per chat. The browser
+    # still posts it on normal turns, while the backend uses this as a safe
+    # restart/reload fallback after re-validating the path.
+    workspace_path = Column(Text, nullable=True)
 
     # Relationship to chat messages
     messages = relationship("ChatMessage", back_populates="session", cascade="all, delete-orphan")
@@ -263,6 +267,7 @@ class Session(TimestampMixin, Base):
             'total_input_tokens': self.total_input_tokens or 0,
             'total_output_tokens': self.total_output_tokens or 0,
             'crew_member_id': self.crew_member_id,
+            'workspace_path': self.workspace_path,
         }
 
 class ChatMessage(Base):
@@ -340,6 +345,42 @@ class DocumentVersion(Base):
     created_at     = Column(DateTime, default=utcnow_naive)
 
     document = relationship("Document", back_populates="versions")
+
+
+class AgentIDESession(TimestampMixin, Base):
+    """Owner-scoped workspace preview exposed through the AgentIDE proxy."""
+    __tablename__ = "agent_ide_sessions"
+
+    id = Column(String, primary_key=True, index=True)
+    owner = Column(String, nullable=True, index=True)
+    chat_session_id = Column(
+        String,
+        ForeignKey("sessions.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    name = Column(String, nullable=False, default="AgentIDE")
+    workspace_path = Column(Text, nullable=False)
+    port = Column(Integer, nullable=False)
+    entry_path = Column(String, nullable=False, default="/")
+    status = Column(String, nullable=False, default="connecting")
+    last_error = Column(String, nullable=True)
+    last_connected_at = Column(DateTime, nullable=True)
+    managed_pid = Column(Integer, nullable=True)
+    managed_log_path = Column(Text, nullable=True)
+
+    __table_args__ = (
+        Index(
+            "ix_agent_ide_owner_workspace",
+            "owner",
+            "workspace_path",
+        ),
+        UniqueConstraint(
+            "owner",
+            "workspace_path",
+            name="uq_agent_ide_owner_workspace",
+        ),
+    )
 
 
 class GalleryAlbum(TimestampMixin, Base):
@@ -2126,6 +2167,8 @@ def init_db():
     """
     _migrate_model_endpoints()
     Base.metadata.create_all(bind=engine)
+    _migrate_agent_ide_unique_index()
+    _migrate_add_session_workspace_path()
     # Lock the DB file (and any SQLite sidecars) to 0o600 — it holds bearer-token
     # + bcrypt hashes and encrypted provider keys. POSIX only; safe_chmod no-ops
     # on Windows (ACL-restricted profile dir) and the path helper returns None for
@@ -2210,6 +2253,38 @@ def init_db():
     _migrate_encrypt_signatures()
     _migrate_encrypt_endpoint_keys()
     _migrate_backfill_task_folders()
+
+
+def _migrate_agent_ide_unique_index():
+    """Add the AgentIDE owner/workspace idempotency constraint on upgrades."""
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS "
+                "uq_agent_ide_owner_workspace "
+                "ON agent_ide_sessions(owner, workspace_path)"
+            ))
+    except Exception as exc:
+        # A pre-release build may have created duplicate rows before the
+        # constraint existed. Keep startup available and make the repair
+        # visible rather than deleting a user's saved connection implicitly.
+        logger.warning("Could not create AgentIDE unique index: %s", exc)
+
+
+def _migrate_add_session_workspace_path():
+    """Add the durable per-chat AgentIDE workspace binding on upgrades."""
+    try:
+        columns = {
+            column["name"] for column in inspect(engine).get_columns("sessions")
+        }
+        if "workspace_path" not in columns:
+            with engine.begin() as conn:
+                conn.execute(text(
+                    "ALTER TABLE sessions ADD COLUMN workspace_path TEXT"
+                ))
+            logger.info("Migrated: added sessions.workspace_path")
+    except Exception as exc:
+        logger.warning("sessions.workspace_path migration failed: %s", exc)
 
 
 def _migrate_backfill_task_folders():

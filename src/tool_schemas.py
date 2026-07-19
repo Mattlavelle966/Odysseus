@@ -25,6 +25,7 @@ _REQUIRED_NATIVE_TOOL_ARGS = {
     "read_file": ("path",),
     "write_file": ("path",),
     "edit_file": ("path",),
+    "agent_ide": ("action",),
 }
 
 # ---------------------------------------------------------------------------
@@ -158,6 +159,48 @@ FUNCTION_TOOL_SCHEMAS = [
             "name": "get_workspace",
             "description": "Return the absolute path of the active workspace folder the user is working in. File tools are confined to it; the shell starts there but is not sandboxed. Call this first when the user refers to 'the project'/'the code'/'this folder' without a path, instead of asking them. Takes no arguments.",
             "parameters": {"type": "object", "properties": {}, "required": []}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "agent_ide",
+            "description": "Open a real workspace project in Odysseus with a live browser preview. Use connect for an existing local dev server, or serve_static for a plain HTML/CSS/JS folder. The preview is proxied through Odysseus, so no external port needs to be exposed.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": [
+                            "list", "connect", "serve_static", "open",
+                            "status", "refresh", "stop", "disconnect", "delete"
+                        ]
+                    },
+                    "agent_ide_id": {
+                        "type": "string",
+                        "description": "Existing AgentIDE project id for open/status/refresh/stop/delete"
+                    },
+                    "workspace_path": {
+                        "type": "string",
+                        "description": "Absolute project directory; defaults to the active workspace"
+                    },
+                    "port": {
+                        "type": "integer",
+                        "minimum": 1024,
+                        "maximum": 65535,
+                        "description": "Loopback port used by the project server. Port 3001 is reserved."
+                    },
+                    "entry_path": {
+                        "type": "string",
+                        "description": "Initial browser path, such as / or /dashboard"
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "Optional display name for the project"
+                    }
+                },
+                "required": ["action"]
+            }
         }
     },
     {
@@ -1359,7 +1402,7 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
             content = json.dumps(args)
         else:
             content = args.get("path", "")
-    elif tool_type in ("grep", "glob", "ls"):
+    elif tool_type in ("grep", "glob", "ls", "agent_ide"):
         content = json.dumps(args) if args else "{}"
     elif tool_type == "get_workspace":
         content = ""

@@ -2,6 +2,7 @@ import asyncio
 import sys
 import time
 import collections
+import re
 from typing import Optional, Callable, Awaitable, Tuple, Dict
 from src.constants import MAX_OUTPUT_CHARS
 
@@ -10,6 +11,17 @@ DEFAULT_PYTHON_TIMEOUT = 60 * 60
 
 PROGRESS_INTERVAL_S = 2.0
 PROGRESS_TAIL_LINES = 12
+
+
+_TRAILING_SHELL_BACKGROUND_RE = re.compile(
+    r"(?m)(?<![&>])&[ \t]*(?:#[^\n]*)?$"
+)
+
+
+def _has_unmanaged_background_operator(command: str) -> bool:
+    """Detect a trailing shell ``&`` that can orphan a pipe-owning process."""
+    return bool(_TRAILING_SHELL_BACKGROUND_RE.search(str(command or "")))
+
 
 async def _run_subprocess_streaming(
     proc: asyncio.subprocess.Process,
@@ -103,6 +115,16 @@ async def _run_subprocess_streaming(
 class BashTool:
     async def execute(self, content: str, ctx: dict) -> dict:
         from src.tool_execution import agent_cwd, _truncate
+        if _has_unmanaged_background_operator(content):
+            return {
+                "error": (
+                    "bash: unmanaged trailing '&' is not allowed because it can "
+                    "leave the chat waiting on an orphaned process. Put #!bg on "
+                    "the first line for a managed background job, or run a "
+                    "finite foreground command."
+                ),
+                "exit_code": 2,
+            }
         progress_cb = ctx.get("progress_cb")
         _subproc_env = ctx.get("subproc_env")
         proc = await asyncio.create_subprocess_shell(

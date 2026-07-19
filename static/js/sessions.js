@@ -1795,6 +1795,14 @@ export async function selectSession(id, { keepSidebar = false, showLoading = tru
       if (presetsModule && presetsModule.onSessionSwitch) presetsModule.onSessionSwitch(id);
     } catch (e) {}
     const meta = sessions.find(s => s.id === id);
+    // /agentIDE bindings are per chat. Restore (or clear) the durable binding
+    // when switching chats so one project's tools cannot bleed into another.
+    if (meta && Object.prototype.hasOwnProperty.call(meta, 'workspace_path')) {
+      try {
+        const workspaceModule = await import('./workspace.js');
+        workspaceModule.setWorkspace(meta.workspace_path || '');
+      } catch (_) {}
+    }
 
     // Detach any in-flight stream to background instead of aborting
     try {

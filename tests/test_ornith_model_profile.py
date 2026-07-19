@@ -308,3 +308,57 @@ def test_ornith_document_schema_pins_id_version_and_validates_ranges(monkeypatch
     db = SessionLocal()
     assert db.get(Document, "doc-1").current_content == "Hello Odysseus"
     db.close()
+
+
+def test_native_create_document_preserves_html_title_and_preview_markup(
+    monkeypatch,
+):
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+    import src.database
+    monkeypatch.setattr(src.database, "SessionLocal", SessionLocal)
+
+    db = SessionLocal()
+    db.add(
+        ChatSession(
+            id="session-html",
+            name="HTML",
+            owner="alice",
+            endpoint_url="http://model/v1/chat/completions",
+            model="Ornith-1.0-35B",
+        )
+    )
+    db.commit()
+    db.close()
+
+    html = (
+        "<!doctype html><html><head><title>Page title</title>"
+        "<style>body{color:red}</style></head>"
+        "<body><h1>Rendered page</h1><script>"
+        "document.body.dataset.ready='1'</script></body></html>"
+    )
+    block = function_call_to_tool_block(
+        "create_document",
+        json.dumps({
+            "title": "Company website",
+            "language": "html",
+            "content": html,
+        }),
+    )
+    result = asyncio.run(
+        document_tools.CreateDocumentTool().execute(
+            block.content,
+            {"session_id": "session-html", "owner": "alice"},
+        )
+    )
+
+    assert result["result"] == "success"
+    assert result["title"] == "Company website"
+    assert result["language"] == "html"
+    assert result["content"] == html
+    assert not result["content"].startswith("Company website\nhtml\n")

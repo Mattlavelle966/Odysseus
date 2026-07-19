@@ -2,6 +2,7 @@
 import os
 from fastapi import APIRouter, Request, HTTPException, Query
 
+from core.database import Session as DbSession, SessionLocal, utcnow_naive
 from src.auth_helpers import get_current_user
 from src.tool_security import owner_is_admin_or_single_user
 
@@ -81,5 +82,45 @@ def setup_workspace_routes():
         from src.tool_execution import vet_workspace
         resolved = vet_workspace(path)
         return {"ok": resolved is not None, "path": resolved}
+
+    @router.post("/bind")
+    async def bind(request: Request):
+        """Persist a validated workspace on a chat and put it in Agent mode.
+
+        This is the deterministic backend half of /agentIDE. Ownership is
+        checked before path validation so the endpoint cannot be used to probe
+        filesystem paths through another user's chat.
+        """
+        owner = get_current_user(request)
+        if not owner_is_admin_or_single_user(owner):
+            raise HTTPException(status_code=403, detail="Workspace selection is admin-only")
+        body = await request.json()
+        session_id = str(body.get("session_id") or "").strip()
+        requested = str(body.get("path") or "").strip()
+        if not session_id:
+            raise HTTPException(status_code=400, detail="An active chat session is required")
+
+        from routes.session_routes import _verify_session_owner
+        _verify_session_owner(request, session_id)
+        from src.tool_execution import vet_workspace
+        resolved = vet_workspace(requested)
+        if not resolved:
+            raise HTTPException(
+                status_code=400,
+                detail="Workspace must be an existing, usable directory",
+            )
+
+        db = SessionLocal()
+        try:
+            row = db.query(DbSession).filter(DbSession.id == session_id).first()
+            if row is None:
+                raise HTTPException(status_code=404, detail="Chat session not found")
+            row.workspace_path = resolved
+            row.mode = "agent"
+            row.updated_at = utcnow_naive()
+            db.commit()
+        finally:
+            db.close()
+        return {"ok": True, "path": resolved, "session_id": session_id, "mode": "agent"}
 
     return router

@@ -136,6 +136,7 @@ BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "edit_image": "Edit an image in the gallery: upscale (increase resolution), remove background (rembg), inpaint (fill selected area), or harmonize (blend edits). Specify image ID and action.",
     "trigger_research": "Start a deep research job on any topic — appears in the Deep Research sidebar, streams progress, produces a detailed report. Use for 'research X', 'look into Y', 'do deep research on Z', 'investigate'. NOT a scheduled task — it runs now and surfaces in the sidebar.",
     "manage_bg_jobs": "Inspect and control detached background `bash` jobs (the ones started with a `#!bg` marker). action='list' shows this chat's jobs (id/status/age/command); action='output' returns a job's captured output so far (check on a long-running job, or re-read a finished one); action='kill' stops a runaway job by id. Use for 'is the background job done', 'check on that job', 'show the build output', 'kill the background job', 'stop the bg task'. output/kill need a job_id from list.",
+    "agent_ide": "Open and live-preview a real workspace web project inside Odysseus. Connect to a loopback dev-server port, or start a managed static server for plain HTML/CSS/JS. Use for site/app/project development that should remain in one directory and be previewed without exposing another host port.",
 }
 
 
@@ -356,6 +357,10 @@ class ToolIndex:
                    "check on that job", "job output", "kill the job",
                    "kill the background", "stop the background", "running job"}):
             {"manage_bg_jobs"},
+        frozenset({"agentide", "agent ide", "live preview", "project preview",
+                   "preview the site", "preview the app", "dev server",
+                   "localhost", "frontend preview"}):
+            {"agent_ide", "bash", "read_file", "write_file", "edit_file", "grep", "glob", "ls"},
         frozenset({"note", "todo", "reminder", "remind", "checklist", "remember to"}):
             {"manage_notes"},
         # Chat/session management. "rename" alone maps to documents below, so a

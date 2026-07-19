@@ -28,6 +28,7 @@ import notesModule from './js/notes.js';
 import adminModule from './js/admin.js';
 import settingsModule from './js/settings.js';
 import emailResearchWorkerModule from './js/emailResearchWorker.js';
+import agentIDEModule from './js/agentIDE.js';
 // Eagerly bind unified minimize/restore behavior across all tool modals.
 import './js/modalManager.js';
 // Desktop window tiling — drag a modal near an edge/corner to snap.
@@ -162,6 +163,7 @@ function initRailHoverLabels() {
     'rail-delete-session': 'Delete',
     'rail-chats': 'Chat',
     'rail-documents': 'Docs',
+    'rail-agentide': 'AgentIDE',
     'rail-calendar': 'Calendar',
     'rail-compare': 'Compare',
     'rail-cookbook': 'Cookbook',
@@ -1023,6 +1025,13 @@ function initializeEventListeners() {
     });
   }
 
+  const toolAgentIDEBtn = el('tool-agentide-btn');
+  if (toolAgentIDEBtn) {
+    toolAgentIDEBtn.addEventListener('click', () => {
+      if (agentIDEModule) agentIDEModule.togglePanel();
+    });
+  }
+
   // ── Cookbook modal toggle ──
   const toolCookbookBtn = el('tool-cookbook-btn');
   if (toolCookbookBtn) {
@@ -1196,6 +1205,7 @@ function initializeEventListeners() {
       }
     },
     '/calendar': () => calendarModule && calendarModule.openCalendar(),
+    '/agentide': () => agentIDEModule && agentIDEModule.openPanel(),
     '/cookbook': () => document.getElementById('tool-cookbook-btn')?.click(),
     '/email':    () => {
       // Collapse the wide sidebar → icon rail (48px) so the user keeps
@@ -1323,6 +1333,12 @@ function initializeEventListeners() {
     .then(d => {
       window._isAdmin = !!d.is_admin;
       if (d.is_admin && userBarAdmin) userBarAdmin.style.display = '';
+      if (d.is_admin) {
+        const agentIDEButton = el('tool-agentide-btn');
+        const agentIDERail = el('rail-agentide');
+        if (agentIDEButton) agentIDEButton.style.display = '';
+        if (agentIDERail) agentIDERail.style.display = '';
+      }
       const userBarName = el('user-bar-name');
       const userBarAvatar = el('user-bar-avatar');
       if (userBarName && d.username) {
@@ -3664,6 +3680,7 @@ function startOdysseusApp() {
   // Rail tool buttons — delegate to sidebar tool buttons
   const _railToolMap = {
     'rail-compare':   'tool-compare-btn',
+    'rail-agentide':  'tool-agentide-btn',
     'rail-research':  'tool-research-btn',
     'rail-cookbook':   'tool-cookbook-btn',
     'rail-archive':   'tool-library-btn',

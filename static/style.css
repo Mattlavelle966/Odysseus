@@ -40451,3 +40451,295 @@ body.theme-frosted .modal {
   .compare-grid[data-cols] { grid-template-columns: 1fr !important; overflow-y: auto; }
   .compare-pane { min-height: 60dvh; }
 }
+
+/* ===== AgentIDE docked workspace preview ===== */
+body.agentide-view .chat-container { flex: 1; min-width: 300px; }
+.agentide-divider {
+  width: 1px;
+  flex: 0 0 1px;
+  align-self: stretch;
+  position: relative;
+  z-index: 12;
+  cursor: col-resize;
+  background: color-mix(in srgb, var(--fg) 13%, transparent);
+}
+.agentide-divider::before {
+  content: "";
+  position: absolute;
+  inset: 0 -8px;
+}
+.agentide-divider:hover {
+  background: color-mix(in srgb, var(--accent) 68%, transparent);
+}
+.agentide-pane {
+  width: min(58vw, 980px);
+  min-width: 360px;
+  height: 100dvh;
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  color: var(--fg);
+  background: color-mix(in srgb, var(--panel) 96%, var(--bg));
+  border-left: 1px solid var(--border);
+}
+.agentide-pane.hidden,
+.agentide-divider.hidden { display: none !important; }
+.agentide-header {
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 12px 0 15px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--panel) 92%, transparent);
+}
+.agentide-brand,
+.agentide-header-actions,
+.agentide-config-row,
+.agentide-status-row,
+.agentide-preview-toolbar,
+.agentide-viewport-switch {
+  display: flex;
+  align-items: center;
+}
+.agentide-brand { gap: 9px; min-width: 0; font-weight: 650; }
+.agentide-brand > svg {
+  width: 19px;
+  height: 19px;
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.agentide-header-actions { gap: 3px; }
+.agentide-header button,
+.agentide-config button,
+.agentide-preview-toolbar button,
+.agentide-viewport-switch button {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--bg) 72%, transparent);
+  color: var(--fg);
+  min-height: 29px;
+  padding: 4px 9px;
+  cursor: pointer;
+}
+.agentide-header button {
+  width: 30px;
+  padding: 0;
+  font-size: 17px;
+}
+.agentide-header button:disabled,
+.agentide-config button:disabled { opacity: .35; cursor: default; }
+.agentide-status {
+  padding: 3px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  color: var(--color-text-dim, #999);
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+}
+.agentide-status.running {
+  color: #36d786;
+  background: color-mix(in srgb, #36d786 12%, transparent);
+}
+.agentide-status.failed,
+.agentide-status.unreachable {
+  color: var(--color-error, #ef6a72);
+  background: color-mix(in srgb, var(--color-error, #ef6a72) 12%, transparent);
+}
+.agentide-status.starting { color: var(--accent); }
+.agentide-config {
+  display: grid;
+  gap: 7px;
+  padding: 10px 12px 9px;
+  border-bottom: 1px solid var(--border);
+}
+.agentide-config-row { gap: 7px; min-width: 0; }
+.agentide-config select,
+.agentide-config input {
+  height: 31px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  outline: none;
+  color: var(--fg);
+  background: var(--bg);
+  padding: 5px 8px;
+  font: inherit;
+  font-size: 12px;
+}
+.agentide-config select:focus,
+.agentide-config input:focus { border-color: var(--accent); }
+#agentide-projects { flex: 1.25; }
+#agentide-name { flex: .75; }
+#agentide-workspace { flex: 1; font-family: var(--font-mono, monospace); }
+.agentide-port-row label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--color-text-dim, #999);
+  font-size: 11px;
+}
+#agentide-port { width: 82px; }
+#agentide-entry { width: 90px; font-family: var(--font-mono, monospace); }
+.agentide-config button.primary {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+.agentide-status-row {
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  color: var(--color-text-dim, #999);
+  font-size: 10px;
+}
+#agentide-status-detail {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agentide-status-row label {
+  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.agentide-preview-toolbar {
+  gap: 7px;
+  min-height: 40px;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--border);
+}
+.agentide-viewport-switch { gap: 2px; }
+.agentide-viewport-switch button {
+  font-size: 10px;
+  min-height: 25px;
+  padding: 3px 7px;
+}
+.agentide-viewport-switch button.active {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.agentide-log-wrap {
+  position: relative;
+  margin-left: auto;
+  font-size: 11px;
+}
+.agentide-log-wrap summary { cursor: pointer; color: var(--color-text-dim, #999); }
+.agentide-log-wrap[open] pre {
+  display: block;
+  position: absolute;
+  top: 25px;
+  right: 0;
+  z-index: 40;
+  width: min(560px, 72vw);
+  max-height: 220px;
+  overflow: auto;
+  margin: 0;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  color: var(--fg);
+  background: var(--bg);
+  box-shadow: 0 14px 40px rgba(0,0,0,.28);
+  white-space: pre-wrap;
+  font-size: 10px;
+}
+.agentide-log-wrap pre { display: none; }
+.agentide-preview-toolbar .danger { color: var(--color-error, #ef6a72); }
+#agentide-element-select.active {
+  color: #fff;
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 72%, var(--bg));
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+.agentide-preview-stage.selecting-element::after {
+  content: "Click an element · Esc to cancel";
+  position: absolute;
+  z-index: 4;
+  top: 17px;
+  left: 50%;
+  transform: translateX(-50%);
+  pointer-events: none;
+  padding: 6px 10px;
+  border-radius: 999px;
+  color: #fff;
+  background: color-mix(in srgb, var(--accent) 82%, #17151f);
+  box-shadow: 0 5px 18px rgba(0,0,0,.28);
+  font-size: 11px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+.agentide-preview-stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  justify-content: center;
+  overflow: auto;
+  padding: 10px;
+  background:
+    linear-gradient(45deg, color-mix(in srgb, var(--fg) 3%, transparent) 25%, transparent 25%),
+    linear-gradient(-45deg, color-mix(in srgb, var(--fg) 3%, transparent) 25%, transparent 25%);
+  background-size: 18px 18px;
+}
+#agentide-frame {
+  width: 100%;
+  height: 100%;
+  min-height: 320px;
+  border: 0;
+  border-radius: 6px;
+  background: white;
+  box-shadow: 0 6px 25px rgba(0,0,0,.18);
+  transition: width .2s ease;
+}
+.agentide-preview-stage[data-viewport="tablet"] #agentide-frame { width: min(768px, 100%); }
+.agentide-preview-stage[data-viewport="mobile"] #agentide-frame { width: min(390px, 100%); }
+.agentide-empty {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 30px;
+  text-align: center;
+  color: var(--color-text-dim, #999);
+  pointer-events: none;
+}
+.agentide-empty strong { color: var(--fg); font-size: 15px; }
+.agentide-empty.hidden { display: none; }
+body.agentide-focus .chat-container,
+body.agentide-focus .agentide-divider { display: none !important; }
+body.agentide-focus .agentide-pane { width: 100% !important; flex: 1; }
+
+@media (max-width: 768px) {
+  body.agentide-view .chat-container,
+  body.agentide-view .hamburger-btn,
+  body.agentide-view .mobile-new-chat-btn,
+  body.agentide-view .agentide-divider { display: none !important; }
+  .agentide-pane {
+    position: fixed;
+    inset: 0;
+    z-index: 10020;
+    width: 100% !important;
+    min-width: 0;
+    height: 100dvh;
+  }
+  .agentide-config-row { flex-wrap: wrap; }
+  #agentide-projects, #agentide-name, #agentide-workspace { flex: 1 1 100%; }
+  .agentide-port-row label { flex: 1; }
+  #agentide-port, #agentide-entry { width: 100%; }
+  .agentide-preview-toolbar { overflow-x: auto; }
+  .agentide-log-wrap { margin-left: 0; }
+  .agentide-preview-stage { padding: 5px; }
+}

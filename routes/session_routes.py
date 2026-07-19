@@ -265,7 +265,8 @@ def setup_session_routes(
             last_msg_map = {}
             mode_map = {}
             msg_count_map = {}
-            q = db.query(DbSession.id, DbSession.folder, DbSession.total_input_tokens, DbSession.total_output_tokens, DbSession.is_important, DbSession.created_at, DbSession.updated_at, DbSession.last_message_at, DbSession.mode, DbSession.message_count).filter(DbSession.archived == False)
+            workspace_map = {}
+            q = db.query(DbSession.id, DbSession.folder, DbSession.total_input_tokens, DbSession.total_output_tokens, DbSession.is_important, DbSession.created_at, DbSession.updated_at, DbSession.last_message_at, DbSession.mode, DbSession.message_count, DbSession.workspace_path).filter(DbSession.archived == False)
             q = owner_filter(q, DbSession, user)
             rows = q.all()
             for row in rows:
@@ -283,6 +284,7 @@ def setup_session_routes(
                 )
                 mode_map[row.id] = row.mode
                 msg_count_map[row.id] = row.message_count or 0
+                workspace_map[row.id] = row.workspace_path
             # Sessions with active documents that have content
             from sqlalchemy import func
             doc_session_ids = set(
@@ -315,6 +317,7 @@ def setup_session_routes(
                      "has_documents": s.id in doc_session_ids,
                      "has_images": s.id in img_session_ids,
                      "mode": mode_map.get(s.id),
+                     "workspace_path": workspace_map.get(s.id),
                      "message_count": msg_count_map.get(s.id, 0)}
                     for s in user_sessions.values()
                     if not s.archived

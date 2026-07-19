@@ -143,6 +143,14 @@ export function handleUIControl(uiData) {
         // chip injection needed here anymore.
       }
 
+    } else if (uiEvent === 'open_agent_ide' || uiData.ui_event === 'open_agent_ide') {
+      import('./agentIDE.js').then(function(mod) {
+        var fn = mod.openPanel || (mod.default && mod.default.openPanel);
+        if (fn) fn(uiData.agent_ide_id || null);
+      }).catch(function(error) {
+        console.warn('Could not open AgentIDE:', error);
+      });
+
     } else if (uiEvent === 'open_panel' || uiData.ui_event === 'open_panel') {
       var panel = uiData.panel;
       if (panel === 'documents') {

@@ -175,6 +175,132 @@ def test_active_html_site_edit_targets_the_open_document():
     ) is True
 
 
+def test_new_website_request_targets_editor_preview_not_an_implicit_port():
+    prompt = "Please build me a sleek full blown website for my company."
+
+    assert agent_loop._turn_requests_new_preview_document(prompt) is True
+    assert agent_loop._turn_requests_new_preview_document(
+        "Build this React website in the current repo."
+    ) is False
+    assert agent_loop._turn_requests_new_preview_document(
+        "Build a website and serve it on port 8080."
+    ) is False
+    assert agent_loop._turn_requests_new_preview_document(
+        prompt, workspace="/workspace/project"
+    ) is False
+
+
+@pytest.mark.asyncio
+async def test_ornith_new_website_is_saved_as_previewable_html_document(
+    monkeypatch,
+):
+    calls = 0
+    request_shapes = []
+
+    monkeypatch.setattr(
+        agent_loop,
+        "get_setting",
+        lambda key, default=None: default,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        agent_loop, "get_mcp_manager", lambda: None, raising=False
+    )
+    monkeypatch.setattr(
+        agent_loop, "estimate_tokens", lambda *args, **kwargs: 10, raising=False
+    )
+
+    async def fake_stream(_candidates, messages, **kwargs):
+        nonlocal calls
+        calls += 1
+        request_shapes.append({
+            "tool_names": [
+                schema["function"]["name"]
+                for schema in (kwargs.get("tools") or [])
+            ],
+            "tool_choice": kwargs.get("tool_choice"),
+            "messages": messages,
+        })
+        yield "data: " + json.dumps({
+            "type": "tool_calls",
+            "calls": [{
+                "id": "call-create-site",
+                "name": "create_document",
+                "arguments": json.dumps({
+                    "title": "Company website",
+                    "language": "html",
+                    "content": (
+                        "<!doctype html><html><head><style>"
+                        "body{color:#fff}</style></head>"
+                        "<body><h1>Company</h1><script>"
+                        "document.body.dataset.ready='1'</script></body></html>"
+                    ),
+                }),
+            }],
+        }) + "\n\n"
+        yield "data: [DONE]\n\n"
+
+    async def fake_execute(block, *args, **kwargs):
+        assert block.tool_type == "create_document"
+        return "create_document", {
+            "action": "create",
+            "result": "success",
+            "doc_id": "doc-preview",
+            "title": "Company website",
+            "language": "html",
+            "content": "<!doctype html><html><body>Company</body></html>",
+            "version": 1,
+        }
+
+    monkeypatch.setattr(
+        agent_loop, "stream_llm_with_fallback", fake_stream, raising=False
+    )
+    monkeypatch.setattr(
+        agent_loop, "execute_tool_block", fake_execute, raising=False
+    )
+
+    chunks = [
+        chunk
+        async for chunk in agent_loop.stream_agent_loop(
+            "http://llama.cpp.test/v1/chat/completions",
+            "Ornith-1.0-35B",
+            [{
+                "role": "user",
+                "content": "Build me a sleek website for my company.",
+            }],
+            session_id="session-site",
+            owner="alice",
+            max_rounds=3,
+            relevant_tools={"bash", "web_fetch", "create_document"},
+        )
+    ]
+
+    visible = []
+    for chunk in chunks:
+        if not chunk.startswith("data: ") or chunk == "data: [DONE]\n\n":
+            continue
+        event = json.loads(chunk[6:])
+        if "delta" in event and not event.get("thinking"):
+            visible.append(event["delta"])
+
+    assert calls == 1
+    assert request_shapes[0]["tool_names"] == ["create_document"]
+    assert request_shapes[0]["tool_choice"] == {
+        "type": "function",
+        "function": {"name": "create_document"},
+    }
+    system_text = "\n".join(
+        message.get("content", "")
+        for message in request_shapes[0]["messages"]
+        if message.get("role") == "system"
+    )
+    assert "all CSS and JavaScript inline" in system_text
+    assert "start a server" in system_text
+    assert "".join(visible).endswith(
+        "Created **[Company website](#document-doc-preview)** as version 1."
+    )
+
+
 @pytest.mark.asyncio
 async def test_ornith_document_write_ends_from_stored_result(monkeypatch):
     calls = 0

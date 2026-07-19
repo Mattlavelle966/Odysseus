@@ -45,6 +45,8 @@ Native installs, GPU notes, Windows/macOS instructions, HTTPS, and configuration
 - **Deep Research** — multi-step web research with source reading and report generation.
 - **Compare** — blind side-by-side model testing and synthesis.
 - **Documents** — writing-first editor with AI edits, suggestions, Markdown, HTML, CSV, and syntax highlighting.
+- **AgentIDE** — develop one real workspace project and preview its private
+  local port live inside Odysseus. See the [AgentIDE guide](docs/agentide.md).
 - **Email** — IMAP/SMTP inbox with triage, tags, summaries, reminders, and reply drafts.
 - **Email Research Automation** — approved inbound mail becomes a durable,
   idempotent Deep Research job with threaded acknowledgement and report

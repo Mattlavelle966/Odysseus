@@ -391,21 +391,29 @@ class CreateDocumentTool:
             "ini", "ruby", "php", "csv", "email", "text", "plain", "svg",
         }
 
-        # Try XML tag extraction first
+        # Try the legacy XML wrapper first. Require <content>: a normal HTML
+        # document contains its own <title>, which must not be mistaken for the
+        # tool envelope (doing so prepended the line-based title/language to the
+        # saved page and made Preview render invalid markup).
         title = None
         language = None
         content = None
         mt = _re.search(r"<title>\s*(.*?)\s*</title>", raw, _re.DOTALL | _re.IGNORECASE)
         ml = _re.search(r"<language>\s*(.*?)\s*</language>", raw, _re.DOTALL | _re.IGNORECASE)
         mc = _re.search(r"<content>\s*(.*?)\s*</content>", raw, _re.DOTALL | _re.IGNORECASE)
-        if mt or mc:
+        has_xml_wrapper = bool(mc)
+        if has_xml_wrapper:
             title = mt.group(1).strip() if mt else None
             language = ml.group(1).strip().lower() if ml else None
-            content = mc.group(1) if mc else None
+            content = mc.group(1)
 
         # Fall back to line-based parsing. First strip any stray XML-ish tags.
         if title is None or content is None:
-            cleaned = _re.sub(r"</?(?:title|language|content)>", "", raw)
+            cleaned = (
+                _re.sub(r"</?(?:title|language|content)>", "", raw)
+                if has_xml_wrapper
+                else raw
+            )
             lines = cleaned.strip().split("\n")
             if title is None:
                 title = lines[0].strip() if lines else "Untitled"

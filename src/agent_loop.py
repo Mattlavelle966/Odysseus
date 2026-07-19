@@ -303,7 +303,8 @@ _DOMAIN_RULES = {
 ## File rules
 - Use file tools for real disk files. Use document tools only for editor documents.
 - Prefer `grep`, `glob`, and `ls` over shell equivalents when available.
-- Use `edit_file`/`write_file` for writes; avoid shell redirection/heredocs for editing files.""",
+- Use `edit_file`/`write_file` for writes; avoid shell redirection/heredocs for editing files.
+- For a real workspace website/app, keep one project directory, run its server in the background, then use `agent_ide` to open the live preview inside Odysseus. Use `serve_static` when no framework server is needed.""",
     "settings": """\
 ## Settings/API rules
 - Use `manage_settings` for preferences and tool enable/disable.
@@ -328,7 +329,7 @@ _DOMAIN_TOOL_MAP = {
     "notes_calendar_tasks": {"manage_notes", "manage_calendar", "manage_tasks"},
     "ui": {"ui_control"},
     "sessions": {"create_session", "list_sessions", "manage_session", "send_to_session", "search_chats"},
-    "files": {"bash", "python", "read_file", "write_file", "edit_file", "grep", "glob", "ls", "get_workspace", "manage_bg_jobs"},
+    "files": {"bash", "python", "read_file", "write_file", "edit_file", "grep", "glob", "ls", "get_workspace", "manage_bg_jobs", "agent_ide"},
     "settings": {"manage_settings", "manage_endpoints", "manage_mcp", "manage_webhooks", "manage_tokens", "app_api"},
     "contacts": {"resolve_contact", "manage_contact"},
     "integrations": {"api_call"},
@@ -359,7 +360,7 @@ For LONG-running commands (package installs, pip/npm, ffmpeg, model downloads, t
 #!bg
 pip install openai-whisper
 ```
-SANDBOX LIMITS: stdin/stdout are pipes, so there is NO interactive terminal — `input()`, `curses`, `termios`, `pygame`, and `tkinter` will all fail. Don't try to RUN interactive terminal games or GUI apps here — verify syntax (`python -c "import py_compile; py_compile.compile('x.py')"`) and tell the user to run it themselves in their own terminal. For anything the USER should play/use interactively (games, UIs, demos), prefer a single self-contained HTML file with `<canvas>` + inline JS — save it via `create_document` with language="html" and tell the user to hit the Run / Preview button (▶) in the document editor toolbar; it renders inline in a sandboxed iframe so the game is playable right there. Works from any machine that can reach the Odysseus UI — no need to copy files out.
+SANDBOX LIMITS: stdin/stdout are pipes, so there is NO interactive terminal — `input()`, `curses`, `termios`, `pygame`, and `tkinter` will all fail. Don't try to RUN interactive terminal games or GUI apps here. For a standalone one-file artifact with no workspace, create an HTML editor document for Run / Preview. For a real workspace website/app, develop the files in that same directory, launch its server with `#!bg`, and call `agent_ide connect`; for plain HTML/CSS/JS call `agent_ide serve_static`. This renders through Odysseus without exposing the project port publicly.
 NEVER pipe multi-line Python through `python -c "..."` — shell quoting eats real newlines and `\\n` arrives as literal backslash-n, which Python parses as a line-continuation error on line 1. To run multi-line code, either use the dedicated `python` tool block above, or save to a file first with a quoted HEREDOC (`cat > /tmp/x.py << 'EOF' ... EOF`) and then `python /tmp/x.py`.""",
 
     "python": """\
@@ -411,6 +412,12 @@ Edit an EXISTING file by exact string replacement. PREFER this over bash (sed/ec
 ```get_workspace
 ```
 Return the absolute path of the active workspace folder. File tools are CONFINED to it (paths can be RELATIVE to it); the shell starts there (cwd) but is NOT sandboxed. Call this first when the user says "the project"/"the code"/"this folder" without a path, instead of asking them. No arguments.""",
+
+    "agent_ide": """\
+```agent_ide
+{"action":"connect|serve_static|open|status|refresh|stop|delete","workspace_path":"/workspace/project","port":4173,"entry_path":"/"}
+```
+Open a REAL workspace web project in the docked AgentIDE live-preview panel. Use `connect` after starting the project's own server on a loopback port with a background bash job. Use `serve_static` for plain HTML/CSS/JS folders (port is optional). Keep editing the same workspace files; never create duplicate editor documents as project versions. `open`, `status`, `refresh`, `stop`, and `delete` take `agent_ide_id`. Completion requires a successful AgentIDE tool result, not merely saying a preview is available.""",
 
     "create_document": """\
 ```create_document
@@ -1084,6 +1091,72 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
         "domains": domains,
         "retrieval_query": retrieval_query,
     }
+
+
+_NEW_PREVIEW_TARGET_RE = re.compile(
+    r"\b(?:web\s*site|web\s*page|landing\s+page|front[ -]?end|"
+    r"interactive\s+(?:ui|demo|game)|browser\s+(?:app|game|demo))\b",
+    re.IGNORECASE,
+)
+_NEW_PREVIEW_ACTION_RE = re.compile(
+    r"\b(?:build|create|design|develop|generate|make|put\s+together)\b",
+    re.IGNORECASE,
+)
+_EXPLICIT_PROJECT_BUILD_RE = re.compile(
+    r"(?:"
+    r"\b(?:repo(?:sitory)?|workspace|folder|directory|project\s+files?|"
+    r"multi[ -]?file|npm|pnpm|yarn|vite|webpack|react|vue|svelte|next\.?js)\b"
+    r"|(?:^|\s)(?:/workspace/|~/|\./|\.\./)"
+    r"|\b(?:serve|host|listen|run)\b.{0,24}\b(?:localhost|port\s+\d+)\b"
+    r"|\b(?:localhost|port\s+\d+)\b"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _turn_requests_new_preview_document(
+    last_user: str,
+    active_document=None,
+    workspace: Optional[str] = None,
+) -> bool:
+    """Route a new browser artifact to the editor's sandboxed HTML preview.
+
+    A website request with no project/workspace context is an artifact the user
+    should be able to inspect in Odysseus. Treat explicit repository/framework/
+    port work as a real filesystem project instead.
+    """
+    text = str(last_user or "").strip()
+    if not text or active_document is not None or workspace:
+        return False
+    if _EXPLICIT_PROJECT_BUILD_RE.search(text):
+        return False
+    return bool(
+        _NEW_PREVIEW_TARGET_RE.search(text)
+        and _NEW_PREVIEW_ACTION_RE.search(text)
+    )
+
+
+def _turn_requests_agent_ide_project(
+    last_user: str,
+    workspace: Optional[str] = None,
+) -> bool:
+    """Detect real web-project work that belongs in AgentIDE, not Documents."""
+    text = str(last_user or "").strip()
+    if not text:
+        return False
+    if re.search(r"\bagent\s*ide\b|\bagentide\b", text, re.IGNORECASE):
+        return True
+    is_web_target = bool(_NEW_PREVIEW_TARGET_RE.search(text)) or bool(
+        re.search(
+            r"\b(?:site|website|frontend|front-end|web\s*app|preview|"
+            r"localhost|dev\s*server|vite|react|vue|svelte|next\.?js)\b",
+            text,
+            re.IGNORECASE,
+        )
+    )
+    if not is_web_target:
+        return False
+    return bool(workspace or _EXPLICIT_PROJECT_BUILD_RE.search(text))
 
 
 def _turn_targets_active_document(intent: Dict[str, object], last_user: str, active_document) -> bool:
@@ -2667,6 +2740,27 @@ async def stream_agent_loop(
     _ody_qwen_finetune_model = (model or "").lower().startswith("odysseus-qwen3")
     _ody_memory_identity_turn = _looks_like_memory_identity_turn(_last_user)
     _intent = _classify_agent_request(messages, _last_user)
+    _new_preview_document_request = _turn_requests_new_preview_document(
+        _last_user,
+        active_document=active_document,
+        workspace=workspace,
+    )
+    _agent_ide_project_request = _turn_requests_agent_ide_project(
+        _last_user,
+        workspace=workspace,
+    )
+    if _agent_ide_project_request:
+        _project_domains = set(_intent.get("domains") or set())
+        _project_domains.add("files")
+        _project_domains.discard("documents")
+        _intent["domains"] = _project_domains
+    if _new_preview_document_request:
+        # A standalone website/UI is a visible editor artifact, not an implicit
+        # request to create an unmanaged project and bind a local port.
+        _preview_domains = set(_intent.get("domains") or set())
+        _preview_domains.add("documents")
+        _preview_domains.discard("files")
+        _intent["domains"] = _preview_domains
     _low_signal_turn = bool(_intent.get("low_signal"))
     _casual_low_signal_turn = _is_casual_low_signal(_last_user)
     _existing_conversation = _user_turn_count(messages) > 1
@@ -2914,6 +3008,10 @@ async def stream_agent_loop(
                 )
         if "ui" in (_intent.get("domains") or set()):
             _relevant_tools.add("ui_control")
+        if _new_preview_document_request:
+            _relevant_tools.add("create_document")
+        if _agent_ide_project_request:
+            _relevant_tools.add("agent_ide")
 
     # If this turn targets the open document, keep editing tools available
     # regardless of which selection path (RAG, keyword, caller-provided) ran.
@@ -3027,7 +3125,7 @@ async def stream_agent_loop(
 
     if (
         _relevant_tools is not None
-        and _active_document_relevant
+        and (_active_document_relevant or _new_preview_document_request)
         and "files" not in _intent_domains
         and not uploaded_files
         and not workspace
@@ -3148,7 +3246,19 @@ async def stream_agent_loop(
             _relevant_tools or {"ask_user", "update_plan"}
         )
         _ornith_allowed.update(set(forced_tools or ()))
-        if _active_document_relevant:
+        if _new_preview_document_request:
+            # One exact side effect is required. A self-contained HTML document
+            # gives the user an editor, version history, and sandboxed Preview;
+            # bash/file tools would instead strand the result on a server port.
+            _ornith_allowed = {"create_document"}
+        elif _agent_ide_project_request:
+            # Keep the profile's tool surface small and project-specific while
+            # retaining the operations needed to inspect, edit, run, and open.
+            _ornith_allowed = {
+                "bash", "read_file", "write_file", "edit_file",
+                "grep", "glob", "ls", "agent_ide",
+            }
+        elif _active_document_relevant:
             _ornith_allowed &= {
                 "create_document", "edit_document", "update_document",
                 "ask_user", "update_plan",
@@ -3161,12 +3271,31 @@ async def stream_agent_loop(
                 - _requested_doc_tools
             )
         _ornith_allowed_names_for_turn = set(_ornith_allowed)
+        _ornith_objective = _last_user
+        if _new_preview_document_request:
+            _ornith_objective = (
+                "Create exactly one self-contained HTML editor document with "
+                "all CSS and JavaScript inline so Run / Preview works inside "
+                "Odysseus. Do not create workspace files or start a server. "
+                f"User request: {_last_user}"
+            )
+        elif _agent_ide_project_request:
+            _ornith_objective = (
+                "Develop the requested site/app in the active workspace. Keep "
+                "one set of project files, validate the project, run its local "
+                "server if needed, and call agent_ide to open the live preview "
+                "inside Odysseus. Do not create editor documents or claim a "
+                f"preview exists without a successful agent_ide result. User request: {_last_user}"
+            )
         _ornith_instruction = _model_profile.agent_instruction(
-            objective=_last_user,
+            objective=_ornith_objective,
             allowed_names=sorted(_ornith_allowed),
             terminal_state=(
-                "the requested side effect is confirmed by a successful tool "
-                "result; prose alone is not success"
+                "one HTML editor document is persisted and its document id is "
+                "returned; prose alone is not success"
+                if _new_preview_document_request
+                else "the requested side effect is confirmed by a successful "
+                "tool result; prose alone is not success"
             ),
             active_document=_prompt_active_document,
         )
@@ -3361,11 +3490,18 @@ async def stream_agent_loop(
     _ornith_document_result = None
     _ornith_document_write_required = bool(
         _ornith_profile
-        and _active_document_relevant
+        and (_active_document_relevant or _new_preview_document_request)
         and (
             {"create_document", "update_document", "edit_document"}
             & set(_ornith_allowed_names_for_turn or ())
         )
+    )
+    _ornith_document_failure = (
+        "I could not create the requested preview document. "
+        "No document was saved."
+        if _new_preview_document_request
+        else "I could not save the requested document change. "
+        "The active document is unchanged."
     )
 
     # Document streaming state (persists across rounds)
@@ -3458,7 +3594,8 @@ async def stream_agent_loop(
         _tool_names_sent = [t.get("function", {}).get("name") for t in (all_tool_schemas or []) if t.get("function")]
         _profile_tool_choice = None
         if _ornith_profile and len(_tool_names_sent) == 1 and (
-            set(forced_tools or ()) & set(_tool_names_sent)
+            (set(forced_tools or ()) & set(_tool_names_sent))
+            or _new_preview_document_request
         ):
             _profile_tool_choice = {
                 "type": "function",
@@ -3956,7 +4093,7 @@ async def stream_agent_loop(
                             "No document write was stored. Do not claim success "
                             "or print a document link. Call exactly one offered "
                             "document function now. Completion requires its "
-                            "result to contain the active document id and a new "
+                            "result to contain a persisted document id and "
                             "stored version number."
                         ),
                     })
@@ -3965,10 +4102,7 @@ async def stream_agent_loop(
                     )
                     yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1, "reason": "ornith_document_write_required"})}\n\n'
                     continue
-                _failure = (
-                    "I could not save the requested document change. "
-                    "The active document is unchanged."
-                )
+                _failure = _ornith_document_failure
                 full_response = _failure
                 round_texts[-1] = _failure
                 yield f'data: {json.dumps({"delta": _failure})}\n\n'
@@ -4481,7 +4615,7 @@ async def stream_agent_loop(
                     # agent can compose-and-open in one tool call.
                     "body",
                     # ui_control open_panel payload
-                    "panel",
+                    "panel", "agent_ide_id",
                 ):
                     if k in result:
                         tool_output_data[k] = result[k]
@@ -4710,10 +4844,7 @@ async def stream_agent_loop(
         yield f'data: {json.dumps({"type": "rounds_exhausted", "rounds": max_rounds})}\n\n'
 
     if _ornith_document_write_required and _ornith_document_result is None:
-        _failure = (
-            "I could not save the requested document change. "
-            "The active document is unchanged."
-        )
+        _failure = _ornith_document_failure
         if _failure not in full_response:
             full_response = _failure
             if round_texts:

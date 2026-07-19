@@ -279,6 +279,13 @@ if AUTH_ENABLED:
     import re as _re
     AUTH_EXEMPT_PATTERNS = [
         _re.compile(r"^/api/tasks/[^/]+/webhook/[^/]+/?$"),
+        # AgentIDE preview iframes have an opaque sandbox origin and therefore
+        # cannot use the Odysseus session cookie for runtime fetches. The
+        # route validates this project-scoped HMAC capability and returns 404
+        # on mismatch; no other AgentIDE API is exempt.
+        _re.compile(
+            r"^/api/agentide/[^/]+/preview-token/[0-9a-f]{64}(?:/.*)?$"
+        ),
     ]
 
     def _is_auth_exempt(path: str) -> bool:
@@ -784,6 +791,9 @@ app.include_router(setup_cookbook_routes())
 
 from routes.workspace_routes import setup_workspace_routes
 app.include_router(setup_workspace_routes())
+
+from routes.agent_ide_routes import setup_agent_ide_routes
+app.include_router(setup_agent_ide_routes())
 
 # Hardware model fitting (cookbook "What Fits?" tab)
 from routes.hwfit_routes import setup_hwfit_routes

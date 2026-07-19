@@ -18,6 +18,7 @@ import spinnerModule from './spinner.js';
 import themeModule from './theme.js';
 import documentModule from './document.js';
 import workspaceModule from './workspace.js';
+import agentIDEModule from './agentIDE.js';
 import settingsModule from './settings.js';
 import cookbookModule from './cookbook.js';
 import { EVAL_PROMPTS } from './compare/index.js';
@@ -1276,6 +1277,76 @@ async function _cmdWorkspace(args, ctx) {
     return true;
   }
   slashReply('Usage: <code>/workspace</code> · <code>set /path</code> · <code>clear</code> · <code>pick</code>');
+  return true;
+}
+
+async function _cmdAgentIDE(args, ctx) {
+  const requested = args.join(' ').trim();
+  if (!requested) {
+    slashReply('Usage: <code>/agentIDE /absolute/workspace/path</code>');
+    return true;
+  }
+
+  if (!sessionModule.getCurrentSessionId() && sessionModule.hasPendingChat()) {
+    const created = await sessionModule.materializePendingSession();
+    if (!created) {
+      slashReply('AgentIDE could not create the chat session.');
+      return true;
+    }
+  }
+  const sessionId = sessionModule.getCurrentSessionId();
+  if (!sessionId) {
+    slashReply('Choose a model or open a chat before starting AgentIDE.');
+    return true;
+  }
+
+  const commandText = `/agentIDE ${requested}`;
+  _addMessage('user', commandText);
+  _persistMsg('user', commandText, { source: 'slash' });
+
+  let bindResponse;
+  try {
+    bindResponse = await fetch(`${API_BASE}/api/workspace/bind`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sessionId, path: requested }),
+    });
+  } catch (_) {
+    slashReply('AgentIDE could not reach the workspace service.');
+    return true;
+  }
+  const binding = await bindResponse.json().catch(() => ({}));
+  if (!bindResponse.ok) {
+    slashReply(`AgentIDE could not use that workspace: ${ctx.esc(binding.detail || 'validation failed')}`);
+    return true;
+  }
+
+  workspaceModule.setWorkspace(binding.path);
+  const session = sessionModule.getSessions().find((item) => item.id === sessionId);
+  if (session) {
+    session.workspace_path = binding.path;
+    session.mode = 'agent';
+  }
+  const agentButton = document.getElementById('mode-agent-btn');
+  if (agentButton && !agentButton.classList.contains('active')) agentButton.click();
+  else if (window.__odysseusSetChatMode) window.__odysseusSetChatMode('agent');
+
+  let ide;
+  try {
+    ide = await agentIDEModule.bindWorkspace(binding.path, sessionId);
+  } catch (error) {
+    slashReply(
+      `The workspace is bound, but its preview could not start: ` +
+      `${ctx.esc(error.message || 'AgentIDE connection failed')}`
+    );
+    return true;
+  }
+  slashReply(
+    `AgentIDE is ready for <code>${ctx.esc(binding.path)}</code>. ` +
+    `This chat now uses that workspace for file and shell tools, and the ` +
+    `<b>${ide.reachable ? 'live' : 'starting'}</b> preview is open.`
+  );
   return true;
 }
 
@@ -5788,6 +5859,14 @@ const COMMANDS = {
     handler: _cmdWorkspace,
     noUserBubble: true,
     usage: '/workspace [set <path> | clear | pick]',
+  },
+  agentide: {
+    alias: ['ide'],
+    category: 'Agent',
+    help: 'Bind a project workspace and open its live preview',
+    handler: _cmdAgentIDE,
+    noUserBubble: true,
+    usage: '/agentIDE /absolute/workspace/path',
   },
   memory: {
     alias: ['m'],
