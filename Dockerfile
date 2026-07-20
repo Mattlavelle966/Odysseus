@@ -16,7 +16,7 @@ FROM python:3.14-slim
 # downloads, and serves from Docker installs.
 # git/cmake are required when Cookbook builds llama.cpp on first llama.cpp
 # launch inside Docker.
-# nodejs/npm provide npx for the optional built-in Browser MCP server.
+# nodejs/npm provide the built-in Playwright browser used for no-code app tests.
 # gosu lets the entrypoint drop privileges cleanly so signals still reach
 # uvicorn directly (no extra shell layer like `su`/`sudo` would add).
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -75,6 +75,17 @@ ARG INSTALL_OPTIONAL=false
 COPY requirements.txt requirements-optional.txt ./
 RUN pip install --no-cache-dir -r requirements.txt \
     && if [ "$INSTALL_OPTIONAL" = "true" ]; then pip install --no-cache-dir -r requirements-optional.txt; fi
+
+# Install the pinned browser agent and its Chromium runtime in a shared path
+# before copying the rest of the source, so dependency layers stay cacheable.
+# `--with-deps` supplies the system libraries needed for real browser launches;
+# registering the MCP alone isn't sufficient on slim images.
+COPY package.json package-lock.json ./
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+RUN npm ci --omit=dev \
+    && npx playwright install --with-deps chromium \
+    && chmod -R a+rX /ms-playwright \
+    && npm cache clean --force
 
 # python-magic powers content-based MIME sniffing in src/upload_handler.py.
 # Image-only (not in requirements.txt) because it needs the libmagic1 system

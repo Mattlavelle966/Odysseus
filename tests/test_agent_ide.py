@@ -5,13 +5,26 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
 import pytest
+import httpx
+from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from core.database import AgentIDESession, Base, Session
-from routes.agent_ide_routes import _rewrite_preview_body, _rewrite_root_references
+from routes.agent_ide_routes import (
+    _preview_bootstrap,
+    _capture_project_cookies,
+    _cookie_jar,
+    _cookie_request,
+    clear_preview_state,
+    _resolve_proxy_target,
+    _rewrite_loopback_references,
+    _rewrite_preview_body,
+    _rewrite_root_references,
+)
 from src import agent_ide
 from src.agent_tools.agent_ide_tools import AgentIDETool
 from src.tool_schemas import function_call_to_tool_block
@@ -62,6 +75,20 @@ def test_port_and_entry_validation_rejects_unsafe_values():
         agent_ide.normalize_entry_path("https://example.test")
 
 
+def test_companion_service_ports_are_bounded_and_deduplicated():
+    assert agent_ide.normalize_service_ports(
+        "4100, 8000, 4100, 5173",
+        primary_port=5173,
+    ) == [4100, 8000]
+    with pytest.raises(ValueError, match="reserved"):
+        agent_ide.normalize_service_ports([3001], primary_port=5173)
+    with pytest.raises(ValueError, match="At most"):
+        agent_ide.normalize_service_ports(
+            list(range(4100, 4117)),
+            primary_port=5173,
+        )
+
+
 def test_connect_upserts_same_owner_workspace_and_scopes_owner(
     ide_db,
     monkeypatch,
@@ -75,6 +102,7 @@ def test_connect_upserts_same_owner_workspace_and_scopes_owner(
         port=5173,
         chat_session_id="chat-a",
         name="Site",
+        service_ports=[4100, 8000],
     )
     second = agent_ide.connect_session(
         owner="admin",
@@ -84,7 +112,9 @@ def test_connect_upserts_same_owner_workspace_and_scopes_owner(
     )
 
     assert first["id"] == second["id"]
+    assert first["service_ports"] == [4100, 8000]
     assert second["port"] == 4173
+    assert second["service_ports"] == []
     assert second["name"] == "Site v2"
     assert agent_ide.get_session("someone-else", first["id"]) is None
     with factory() as db:
@@ -219,6 +249,75 @@ def test_proxy_leaves_binary_response_unchanged():
     ) == payload
 
 
+def test_proxy_targets_only_the_primary_or_registered_services():
+    record = SimpleNamespace(
+        port=5173,
+        service_ports=json.dumps([4100, 8000]),
+    )
+    assert _resolve_proxy_target(record, "api/items") == (5173, "api/items")
+    assert _resolve_proxy_target(
+        record,
+        "__agentide_port/4100/api/signup",
+    ) == (4100, "api/signup")
+    with pytest.raises(HTTPException) as error:
+        _resolve_proxy_target(record, "__agentide_port/9999/private")
+    assert error.value.status_code == 403
+
+
+def test_literal_loopback_urls_map_to_registered_service_mounts():
+    prefix = "/api/agentide/ide-1/preview-token/capability/"
+    source = (
+        "fetch('http://localhost:4100/api/signup');"
+        "new WebSocket('ws://127.0.0.1:8000/events');"
+        "fetch('http://localhost:9000/private');"
+    )
+    rewritten = _rewrite_loopback_references(
+        source,
+        prefix=prefix,
+        primary_port=5173,
+        service_ports=[4100, 8000],
+    )
+    assert f"{prefix}__agentide_port/4100/api/signup" in rewritten
+    assert f"{prefix}__agentide_port/8000/events" in rewritten
+    assert "http://localhost:9000/private" in rewritten
+
+
+def test_project_cookie_jar_supports_localhost_domain_and_httponly_sessions():
+    clear_preview_state("cookie-test")
+    jar = _cookie_jar("cookie-test", 4100)
+    login = _cookie_request("GET", 4100, "/login")
+    response = httpx.Response(
+        200,
+        headers={
+            "set-cookie": (
+                "session=secret; Domain=localhost; Path=/; HttpOnly; SameSite=Lax"
+            )
+        },
+        request=httpx.Request("GET", "http://127.0.0.1:4100/login"),
+    )
+    _capture_project_cookies(jar, response, login)
+    api = _cookie_request("POST", 4100, "/api/me")
+    jar.set_cookie_header(api)
+    assert api.headers["cookie"] == "session=secret"
+    clear_preview_state("cookie-test")
+
+
+def test_bootstrap_supports_streaming_sockets_dynamic_urls_and_diagnostics():
+    source = _preview_bootstrap(
+        "/api/agentide/ide-1/preview-token/capability/",
+        primary_port=5173,
+        service_ports=[4100],
+    )
+    assert "window.WebSocket=AW" in source
+    assert "window.EventSource" in source
+    assert "__agentide_port/4100/" in source
+    assert "unregistered-port" in source
+    assert "MutationObserver" in source
+    assert "odysseus-agentide-diagnostic" in source
+    assert "unhandledrejection" in source
+    assert "console-'+level" in source
+
+
 def test_capability_preview_rewrites_runtime_fetches():
     html = (
         b"<html><head></head><body><script>"
@@ -329,6 +428,15 @@ def test_frontend_iframe_is_sandboxed_and_live_reload_is_revision_driven():
     assert "setInterval(poll, POLL_MS)" in source
     assert 'id="tool-agentide-btn"' in markup
     assert 'id="rail-agentide"' in markup
+    assert 'id="agentide-services"' in source
+    assert 'id="agentide-diagnostics"' in source
+    assert 'id="agentide-output-drawer"' in source
+    assert 'id="agentide-copy-output"' in source
+    assert "toggleOutputDrawer('server')" in source
+    assert "toggleOutputDrawer('diagnostics')" in source
+    assert ".agentide-output-drawer pre" in Path(
+        "static/style.css"
+    ).read_text(encoding="utf-8")
 
 
 def test_frontend_element_select_tags_bounded_untrusted_metadata():

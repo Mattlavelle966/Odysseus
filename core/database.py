@@ -362,6 +362,7 @@ class AgentIDESession(TimestampMixin, Base):
     name = Column(String, nullable=False, default="AgentIDE")
     workspace_path = Column(Text, nullable=False)
     port = Column(Integer, nullable=False)
+    service_ports = Column(Text, nullable=False, default="[]")
     entry_path = Column(String, nullable=False, default="/")
     status = Column(String, nullable=False, default="connecting")
     last_error = Column(String, nullable=True)
@@ -2168,6 +2169,7 @@ def init_db():
     _migrate_model_endpoints()
     Base.metadata.create_all(bind=engine)
     _migrate_agent_ide_unique_index()
+    _migrate_add_agent_ide_service_ports()
     _migrate_add_session_workspace_path()
     # Lock the DB file (and any SQLite sidecars) to 0o600 — it holds bearer-token
     # + bcrypt hashes and encrypted provider keys. POSIX only; safe_chmod no-ops
@@ -2269,6 +2271,24 @@ def _migrate_agent_ide_unique_index():
         # constraint existed. Keep startup available and make the repair
         # visible rather than deleting a user's saved connection implicitly.
         logger.warning("Could not create AgentIDE unique index: %s", exc)
+
+
+def _migrate_add_agent_ide_service_ports():
+    """Add registered companion-service ports used by full-stack previews."""
+    try:
+        columns = {
+            column["name"]
+            for column in inspect(engine).get_columns("agent_ide_sessions")
+        }
+        if "service_ports" not in columns:
+            with engine.begin() as conn:
+                conn.execute(text(
+                    "ALTER TABLE agent_ide_sessions "
+                    "ADD COLUMN service_ports TEXT NOT NULL DEFAULT '[]'"
+                ))
+            logger.info("Migrated: added agent_ide_sessions.service_ports")
+    except Exception as exc:
+        logger.warning("Could not add AgentIDE service ports: %s", exc)
 
 
 def _migrate_add_session_workspace_path():

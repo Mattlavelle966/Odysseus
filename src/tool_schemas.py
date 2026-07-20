@@ -165,7 +165,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "agent_ide",
-            "description": "Open a real workspace project in Odysseus with a live browser preview. Use connect for an existing local dev server, or serve_static for a plain HTML/CSS/JS folder. The preview is proxied through Odysseus, so no external port needs to be exposed.",
+            "description": "Open and test a real workspace project in Odysseus with a live browser preview. Use connect for an existing local dev server, or serve_static for a plain HTML/CSS/JS folder. Register companion API/socket ports in service_ports. The preview is proxied through Odysseus, so no external port needs to be exposed; after connecting, browser tools can navigate, click, type, inspect, and screenshot the returned preview_url.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -189,6 +189,16 @@ FUNCTION_TOOL_SCHEMAS = [
                         "minimum": 1024,
                         "maximum": 65535,
                         "description": "Loopback port used by the project server. Port 3001 is reserved."
+                    },
+                    "service_ports": {
+                        "type": "array",
+                        "items": {
+                            "type": "integer",
+                            "minimum": 1024,
+                            "maximum": 65535
+                        },
+                        "maxItems": 16,
+                        "description": "Additional loopback ports used by this app, such as an API, auth server, or WebSocket service."
                     },
                     "entry_path": {
                         "type": "string",

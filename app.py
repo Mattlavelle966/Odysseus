@@ -381,18 +381,24 @@ if AUTH_ENABLED:
                     "access-control-request-headers",
                     "",
                 )
-                allowed_names = {
-                    "accept",
-                    "accept-language",
-                    "content-language",
-                    "content-type",
-                    "x-requested-with",
-                    "x-tz-offset",
+                forbidden_names = {
+                    "connection",
+                    "content-length",
+                    "cookie",
+                    "host",
+                    "origin",
+                    "proxy-authorization",
+                    "referer",
+                    "transfer-encoding",
                 }
                 allowed_headers = ", ".join(
                     item.strip()
                     for item in requested_headers.split(",")
-                    if item.strip().lower() in allowed_names
+                    if item.strip()
+                    and item.strip().lower() not in forbidden_names
+                    and not item.strip().lower().startswith(
+                        ("sec-", "proxy-", "x-forwarded-")
+                    )
                 )
                 return Response(
                     status_code=204,

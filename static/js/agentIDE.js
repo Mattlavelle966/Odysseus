@@ -22,6 +22,7 @@ let iframeLoaded = false;
 let reloadTimer = null;
 let elementSelectRequest = null;
 let messageListenerAttached = false;
+let diagnostics = [];
 
 const esc = (value) => uiModule?.esc
   ? uiModule.esc(String(value ?? ''))
@@ -148,6 +149,100 @@ function limitedText(value, maxLength) {
     : '';
 }
 
+function renderDiagnostics() {
+  if (!panel) return;
+  const output = panel.querySelector('#agentide-diagnostics');
+  const count = panel.querySelector('#agentide-diagnostic-count');
+  if (count) count.textContent = String(diagnostics.length);
+  if (!output) return;
+  output.textContent = diagnostics.length
+    ? diagnostics.map((item) => {
+        const details = Object.entries(item.details || {})
+          .map(([key, value]) => `${key}=${value}`)
+          .join(' · ');
+        return `[${new Date(item.time).toLocaleTimeString()}] ${item.kind}${details ? ` · ${details}` : ''}`;
+      }).join('\n')
+    : 'No browser errors or failed requests.';
+  output.scrollTop = output.scrollHeight;
+}
+
+function setOutputDrawer(kind = null) {
+  if (!panel) return;
+  const drawer = panel.querySelector('#agentide-output-drawer');
+  const server = panel.querySelector('#agentide-log');
+  const diagnosticOutput = panel.querySelector('#agentide-diagnostics');
+  const title = panel.querySelector('#agentide-output-title');
+  const clear = panel.querySelector('#agentide-clear-diagnostics');
+  const serverButton = panel.querySelector('#agentide-show-server-output');
+  const diagnosticsButton = panel.querySelector('#agentide-show-diagnostics');
+  const open = kind === 'server' || kind === 'diagnostics';
+
+  drawer.hidden = !open;
+  server.hidden = kind !== 'server';
+  diagnosticOutput.hidden = kind !== 'diagnostics';
+  clear.hidden = kind !== 'diagnostics';
+  title.textContent = kind === 'diagnostics' ? 'Browser diagnostics' : 'Server output';
+  serverButton.setAttribute('aria-pressed', String(kind === 'server'));
+  diagnosticsButton.setAttribute('aria-pressed', String(kind === 'diagnostics'));
+  serverButton.classList.toggle('active', kind === 'server');
+  diagnosticsButton.classList.toggle('active', kind === 'diagnostics');
+
+  if (open) {
+    const output = kind === 'diagnostics' ? diagnosticOutput : server;
+    requestAnimationFrame(() => {
+      output.scrollTop = output.scrollHeight;
+      output.focus({ preventScroll: true });
+    });
+  }
+}
+
+function toggleOutputDrawer(kind) {
+  const drawer = panel?.querySelector('#agentide-output-drawer');
+  const closing = !drawer?.hidden && drawer.dataset.kind === kind;
+  drawer.dataset.kind = closing ? '' : kind;
+  setOutputDrawer(closing ? null : kind);
+}
+
+async function copyVisibleOutput() {
+  const drawer = panel?.querySelector('#agentide-output-drawer');
+  const kind = drawer?.dataset.kind;
+  const output = kind === 'diagnostics'
+    ? panel?.querySelector('#agentide-diagnostics')
+    : panel?.querySelector('#agentide-log');
+  const text = output?.textContent || '';
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+    toast(`${kind === 'diagnostics' ? 'Diagnostics' : 'Server output'} copied`);
+  } catch (_) {
+    const range = document.createRange();
+    range.selectNodeContents(output);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    toast('Output selected. Use Copy from your browser.');
+  }
+}
+
+function addDiagnostic(raw) {
+  if (!raw || typeof raw !== 'object') return;
+  const kind = limitedText(raw.kind, 60) || 'preview-error';
+  const details = {};
+  if (raw.details && typeof raw.details === 'object' && !Array.isArray(raw.details)) {
+    for (const [key, value] of Object.entries(raw.details).slice(0, 12)) {
+      const safeKey = limitedText(key, 60);
+      if (safeKey) details[safeKey] = limitedText(String(value), 500);
+    }
+  }
+  diagnostics.push({
+    kind,
+    details,
+    time: Number.isFinite(Number(raw.time)) ? Number(raw.time) : Date.now(),
+  });
+  diagnostics = diagnostics.slice(-100);
+  renderDiagnostics();
+}
+
 function normalizeElementDetails(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
   const tag = limitedText(raw.tag, 40).toLowerCase();
@@ -230,8 +325,13 @@ function tagElementInComposer(details) {
 
 function handlePreviewMessage(event) {
   const frame = panel?.querySelector('#agentide-frame');
-  if (!frame || event.source !== frame.contentWindow || !elementSelectRequest) return;
+  if (!frame || event.source !== frame.contentWindow) return;
   const data = event.data;
+  if (data?.type === 'odysseus-agentide-diagnostic') {
+    addDiagnostic(data);
+    return;
+  }
+  if (!elementSelectRequest) return;
   if (!data || typeof data !== 'object' || data.requestId !== elementSelectRequest) return;
   if (data.type === 'odysseus-agentide-element-cancelled') {
     stopElementSelect({ notifyPreview: false });
@@ -254,6 +354,7 @@ function fillForm(session) {
   if (!panel || !session) return;
   panel.querySelector('#agentide-workspace').value = session.workspace_path || '';
   panel.querySelector('#agentide-port').value = session.port || '';
+  panel.querySelector('#agentide-services').value = (session.service_ports || []).join(', ');
   panel.querySelector('#agentide-entry').value = session.entry_path || '/';
   panel.querySelector('#agentide-name').value = session.name || '';
 }
@@ -336,6 +437,11 @@ function setBusy(busy) {
 async function connect(startStatic) {
   const workspace = panel.querySelector('#agentide-workspace').value.trim();
   const portText = panel.querySelector('#agentide-port').value.trim();
+  const servicePorts = panel.querySelector('#agentide-services').value
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .map(Number);
   const entry = panel.querySelector('#agentide-entry').value.trim() || '/';
   const name = panel.querySelector('#agentide-name').value.trim();
   if (!workspace) {
@@ -346,6 +452,10 @@ async function connect(startStatic) {
     toast('Enter the local project port', true);
     return;
   }
+  if (servicePorts.some((port) => !Number.isInteger(port) || port < 1024 || port > 65535)) {
+    toast('Services must be comma-separated ports from 1024 to 65535', true);
+    return;
+  }
   setBusy(true);
   try {
     const session = await api('/sessions', {
@@ -353,6 +463,7 @@ async function connect(startStatic) {
       body: JSON.stringify({
         workspace_path: workspace,
         port: portText ? Number(portText) : null,
+        service_ports: servicePorts,
         entry_path: entry,
         name: name || null,
         chat_session_id: window.sessionModule?.getCurrentSessionId?.() || null,
@@ -458,6 +569,7 @@ function ensurePanel() {
       </div>
       <div class="agentide-config-row agentide-port-row">
         <label>Port <input id="agentide-port" type="number" min="1024" max="65535" placeholder="5173"></label>
+        <label>Services <input id="agentide-services" type="text" inputmode="numeric" spellcheck="false" placeholder="4100, 8000" title="Additional API, auth, or WebSocket ports"></label>
         <label>Path <input id="agentide-entry" type="text" value="/" spellcheck="false"></label>
         <button class="agentide-connect-action primary" id="agentide-connect">Connect</button>
         <button class="agentide-connect-action" id="agentide-static">Start static</button>
@@ -474,13 +586,24 @@ function ensurePanel() {
         <button data-viewport="mobile">Mobile</button>
       </div>
       <button id="agentide-element-select" aria-pressed="false" disabled>Element select</button>
-      <details class="agentide-log-wrap">
-        <summary>Server output</summary>
-        <pre id="agentide-log">No managed-server output.</pre>
-      </details>
+      <button id="agentide-show-server-output" class="agentide-output-toggle" aria-pressed="false">Server output</button>
+      <button id="agentide-show-diagnostics" class="agentide-output-toggle" aria-pressed="false">Diagnostics (<span id="agentide-diagnostic-count">0</span>)</button>
       <button id="agentide-stop">Stop</button>
       <button id="agentide-delete" class="danger">Remove</button>
     </div>
+    <section id="agentide-output-drawer" class="agentide-output-drawer" data-kind="" aria-label="AgentIDE output" hidden>
+      <header class="agentide-output-header">
+        <strong id="agentide-output-title">Server output</strong>
+        <span class="agentide-output-hint">Drag the bottom edge to resize</span>
+        <div class="agentide-output-actions">
+          <button id="agentide-copy-output">Copy</button>
+          <button id="agentide-clear-diagnostics" hidden>Clear</button>
+          <button id="agentide-close-output" title="Close output" aria-label="Close output">×</button>
+        </div>
+      </header>
+      <pre id="agentide-log" tabindex="0">No managed-server output.</pre>
+      <pre id="agentide-diagnostics" tabindex="0" hidden>No browser errors or failed requests.</pre>
+    </section>
     <div class="agentide-preview-stage" data-viewport="desktop">
       <div id="agentide-empty" class="agentide-empty">
         <strong>Live project preview</strong>
@@ -502,6 +625,17 @@ function ensurePanel() {
   panel.querySelector('#agentide-static').addEventListener('click', () => connect(true));
   panel.querySelector('#agentide-refresh').addEventListener('click', () => loadPreview(true));
   panel.querySelector('#agentide-element-select').addEventListener('click', toggleElementSelect);
+  panel.querySelector('#agentide-show-server-output').addEventListener('click', () => toggleOutputDrawer('server'));
+  panel.querySelector('#agentide-show-diagnostics').addEventListener('click', () => toggleOutputDrawer('diagnostics'));
+  panel.querySelector('#agentide-copy-output').addEventListener('click', copyVisibleOutput);
+  panel.querySelector('#agentide-close-output').addEventListener('click', () => {
+    panel.querySelector('#agentide-output-drawer').dataset.kind = '';
+    setOutputDrawer(null);
+  });
+  panel.querySelector('#agentide-clear-diagnostics').addEventListener('click', () => {
+    diagnostics = [];
+    renderDiagnostics();
+  });
   panel.querySelector('#agentide-open-tab').addEventListener('click', () => {
     if (current?.reachable) window.open(previewURL(current), '_blank', 'noopener,noreferrer');
   });
@@ -578,6 +712,7 @@ export async function bindWorkspace(workspacePath, chatSessionId) {
     ? {
         workspace_path: workspace,
         port: existing.port,
+        service_ports: existing.service_ports || [],
         entry_path: existing.entry_path || '/',
         name: existing.name || null,
         chat_session_id: chatSessionId || null,
@@ -587,6 +722,7 @@ export async function bindWorkspace(workspacePath, chatSessionId) {
     : {
         workspace_path: workspace,
         port: null,
+        service_ports: [],
         entry_path: '/',
         name: null,
         chat_session_id: chatSessionId || null,

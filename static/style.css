@@ -40677,6 +40677,7 @@ body.agentide-view .chat-container { flex: 1; min-width: 300px; }
   font-size: 11px;
 }
 #agentide-port { width: 82px; }
+#agentide-services { width: 112px; font-family: var(--font-mono, monospace); }
 #agentide-entry { width: 90px; font-family: var(--font-mono, monospace); }
 .agentide-config button.primary {
   color: var(--accent);
@@ -40717,32 +40718,77 @@ body.agentide-view .chat-container { flex: 1; min-width: 300px; }
   color: var(--accent);
   border-color: var(--accent);
 }
-.agentide-log-wrap {
-  position: relative;
-  margin-left: auto;
-  font-size: 11px;
+#agentide-show-server-output { margin-left: auto; }
+.agentide-output-toggle.active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg));
 }
-.agentide-log-wrap summary { cursor: pointer; color: var(--color-text-dim, #999); }
-.agentide-log-wrap[open] pre {
-  display: block;
-  position: absolute;
-  top: 25px;
-  right: 0;
-  z-index: 40;
-  width: min(560px, 72vw);
-  max-height: 220px;
-  overflow: auto;
-  margin: 0;
-  padding: 10px;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  color: var(--fg);
-  background: var(--bg);
-  box-shadow: 0 14px 40px rgba(0,0,0,.28);
-  white-space: pre-wrap;
+.agentide-output-drawer {
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  height: min(30dvh, 280px);
+  min-height: 132px;
+  max-height: 58dvh;
+  overflow: hidden;
+  resize: vertical;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg) 96%, #000);
+}
+.agentide-output-drawer[hidden] { display: none !important; }
+.agentide-output-header {
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 10px 5px 13px;
+  border-bottom: 1px solid var(--border);
+}
+.agentide-output-header strong { font-size: 12px; }
+.agentide-output-hint {
+  flex: 1;
+  color: var(--color-text-dim, #999);
   font-size: 10px;
 }
-.agentide-log-wrap pre { display: none; }
+.agentide-output-actions {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.agentide-output-actions button {
+  min-height: 26px;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--fg);
+  background: var(--panel);
+  cursor: pointer;
+}
+#agentide-close-output {
+  width: 27px;
+  padding: 0;
+  font-size: 17px;
+}
+.agentide-output-drawer pre {
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: auto;
+  margin: 0;
+  padding: 12px 14px 18px;
+  outline: none;
+  color: #e7e7ee;
+  background: #0d0d12;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  tab-size: 2;
+  user-select: text;
+  font: 12px/1.55 var(--font-mono, ui-monospace, monospace);
+}
+.agentide-output-drawer pre:focus {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 60%, transparent);
+}
 .agentide-preview-toolbar .danger { color: var(--color-error, #ef6a72); }
 #agentide-element-select.active {
   color: #fff;
@@ -40828,8 +40874,16 @@ body.agentide-focus .agentide-pane { width: 100% !important; flex: 1; }
   .agentide-config-row { flex-wrap: wrap; }
   #agentide-projects, #agentide-name, #agentide-workspace { flex: 1 1 100%; }
   .agentide-port-row label { flex: 1; }
-  #agentide-port, #agentide-entry { width: 100%; }
-  .agentide-preview-toolbar { overflow-x: auto; }
-  .agentide-log-wrap { margin-left: 0; }
+  #agentide-port, #agentide-services, #agentide-entry { width: 100%; }
+  .agentide-preview-toolbar {
+    flex-wrap: wrap;
+    overflow: visible;
+  }
+  #agentide-show-server-output { margin-left: 0; }
+  .agentide-output-drawer {
+    height: min(38dvh, 300px);
+    max-height: 62dvh;
+  }
+  .agentide-output-hint { display: none; }
   .agentide-preview-stage { padding: 5px; }
 }

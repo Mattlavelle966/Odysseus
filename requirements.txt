@@ -1,5 +1,8 @@
 fastapi
 uvicorn
+# AgentIDE relays dev-server HMR and application sockets through its private
+# loopback preview gateway.
+websockets>=14,<16
 python-multipart
 python-dotenv
 httpx

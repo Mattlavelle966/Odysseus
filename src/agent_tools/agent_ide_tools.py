@@ -88,6 +88,7 @@ class AgentIDETool:
                     "chat_session_id": chat_session_id,
                     "name": args.get("name"),
                     "agent_ide_id": agent_ide_id or None,
+                    "service_ports": args.get("service_ports") or [],
                 }
                 if action == "connect":
                     if args.get("port") is None:

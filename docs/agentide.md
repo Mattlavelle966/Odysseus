@@ -41,6 +41,8 @@ AgentIDE is an admin-only item in the **Tools** section and icon rail.
 2. Open **Tools → AgentIDE**.
 3. For a framework project, start its development server on a local port and
    enter that port, then select **Connect**.
+   If the app also uses a separate API, authentication server, or socket
+   server, enter those comma-separated loopback ports in **Services**.
 4. For plain HTML/CSS/JavaScript, select **Start static**. Odysseus allocates a
    private port and manages the static server.
 5. Keep **Live reload** enabled. AgentIDE watches the bounded project revision
@@ -64,6 +66,9 @@ copies in the Documents library.
 - **Open in tab** opens the same authenticated proxy URL.
 - **Focus** gives the preview the full Odysseus content area.
 - **Server output** shows the bounded log tail for managed static servers.
+- **Diagnostics** records browser errors, console warnings/errors, failed
+  requests, request status/timing, EventSource failures, and WebSocket
+  failures without exposing the preview capability token.
 - **Stop** stops an AgentIDE-managed server but preserves the saved project.
 - **Remove** stops a managed server and deletes the saved connection. It does
   not delete any project files.
@@ -79,26 +84,34 @@ copies in the Documents library.
   opaque-origin asset and API requests do not need access to the Odysseus
   session cookie. The capability cannot open another project or any Odysseus
   API outside that project's preview mount.
-- Cookies, authorization headers, forwarded headers, and raw authentication
-  data are not sent to the project server.
+- Project cookies are held in an isolated, server-side jar per project and
+  service port. This supports normal `Set-Cookie`, HttpOnly sessions, and
+  authenticated socket handshakes without exposing Odysseus cookies to the
+  app under test.
+- Explicit application headers such as `Authorization`, CSRF headers, and API
+  keys are forwarded only to the selected project's registered loopback
+  service. Odysseus cookies, browser security headers, proxy headers, and raw
+  Odysseus authentication data are never forwarded.
 - Request and response bodies are size-limited.
 - The preview iframe is sandboxed and intentionally omits
   `allow-same-origin` and top-navigation privileges.
 - Root-relative HTML, CSS, and module references are rewritten beneath the
   project's authenticated proxy mount. Binary responses are passed through
-  unchanged.
+  as bounded streams, while EventSource responses stream without buffering.
+- Fetch, XHR, EventSource, WebSocket, `window.open`, and dynamically inserted
+  URL attributes are translated at runtime. Redirects and literal loopback
+  URLs are also translated for all registered project services.
+- WebSocket upgrades are relayed bidirectionally, including subprotocols and
+  the isolated project cookie jar, so Vite-style HMR and application sockets
+  work through the preview.
 
 Only services in the same network namespace as Odysseus are reachable. In a
 container deployment, run the project server inside the Odysseus container or
 provide an explicit, private container-network forward to loopback. AgentIDE
 does not access the Docker socket and does not expose arbitrary host ports.
 
-## Current limitation
-
-The proxy handles normal HTTP methods and asset requests, but it does not proxy
-WebSocket upgrades. Vite-style HMR sockets may therefore be unavailable.
-Revision polling supplies a framework-independent full-page live reload, so
-saved frontend changes still appear automatically.
+Revision polling remains enabled as a framework-independent fallback when a
+project does not provide HMR.
 
 ## Database upgrade and rollback
 

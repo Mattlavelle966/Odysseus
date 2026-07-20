@@ -489,17 +489,26 @@ Key settings:
 
 All upload-limit vars are validated (must be a positive integer) and optional; an invalid value fails fast at startup.
 
-### Built-in MCP servers (optional setup)
+### Built-in browser testing
 
-Odysseus auto-registers a few built-in MCP servers at startup. The npx-based ones (currently the browser server, `@playwright/mcp`) only start when their npm package is already in the local npx cache. If a package isn't cached, that server is skipped with a startup log message explaining what to do, so a fresh install does not block on a multi-minute npm download or hang if Playwright system deps are missing.
+Odysseus auto-registers a few built-in MCP servers at startup. The npx-based
+browser starts when its pinned local package or npx cache entry is available.
+If neither is installed, it is skipped with a startup message so a source
+checkout does not unexpectedly download hundreds of megabytes during startup.
 
-To enable the browser MCP (page navigation, screenshots, vision), run once:
+Docker images install the pinned browser MCP, Chromium, and its shared
+libraries by default. For a source/venv install, enable page navigation,
+clicking, form entry, screenshots, and vision once with:
 
 ```bash
-npx -y @playwright/mcp@latest --version
+npm ci
+npx playwright install --with-deps chromium
 ```
 
-That installs `@playwright/mcp` plus Playwright (~300MB total). Restart Odysseus and the server will register at startup.
+On a host where you cannot install system packages, omit `--with-deps` after
+installing the equivalent Playwright Chromium libraries through the operating
+system. Restart Odysseus after installation; a successful startup reports
+`Built-in: Browser` with its available tools.
 
 ## Architecture
 ```

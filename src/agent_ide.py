@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import logging
 import os
 import secrets
@@ -29,6 +30,7 @@ logger = logging.getLogger(__name__)
 MIN_PREVIEW_PORT = 1024
 MAX_PREVIEW_PORT = 65535
 RESERVED_PORTS = {3001}
+MAX_SERVICE_PORTS = 16
 _REVISION_FILE_LIMIT = 5000
 _REVISION_SKIP_DIRS = {
     ".git",
@@ -98,6 +100,48 @@ def validate_port(value: object) -> int:
     return port
 
 
+def normalize_service_ports(
+    values: object,
+    *,
+    primary_port: Optional[int] = None,
+) -> list[int]:
+    """Validate and deduplicate loopback service ports for one project."""
+    if values is None or values == "":
+        return []
+    if isinstance(values, str):
+        candidates = [item.strip() for item in values.split(",") if item.strip()]
+    elif isinstance(values, (list, tuple, set)):
+        candidates = list(values)
+    else:
+        raise ValueError("Service ports must be a list or comma-separated string")
+    primary = validate_port(primary_port) if primary_port is not None else None
+    result: list[int] = []
+    for candidate in candidates:
+        port = validate_port(candidate)
+        if port != primary and port not in result:
+            result.append(port)
+        if len(result) > MAX_SERVICE_PORTS:
+            raise ValueError(f"At most {MAX_SERVICE_PORTS} service ports may be registered")
+    return result
+
+
+def service_ports_for(record: AgentIDESession) -> list[int]:
+    """Return all allowed loopback ports, with the primary service first."""
+    primary = validate_port(record.port)
+    try:
+        stored = json.loads(record.service_ports or "[]")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        stored = []
+    return [primary, *normalize_service_ports(stored, primary_port=primary)]
+
+
+def is_service_port_allowed(record: AgentIDESession, port: object) -> bool:
+    try:
+        return validate_port(port) in service_ports_for(record)
+    except ValueError:
+        return False
+
+
 def normalize_entry_path(value: object) -> str:
     raw = str(value or "/").strip() or "/"
     if "://" in raw or "\x00" in raw:
@@ -139,6 +183,7 @@ def _serialize(record: AgentIDESession, *, reachable: Optional[bool] = None) -> 
         "name": record.name,
         "workspace_path": record.workspace_path,
         "port": record.port,
+        "service_ports": service_ports_for(record)[1:],
         "entry_path": record.entry_path,
         "status": record.status,
         "last_error": record.last_error,
@@ -281,6 +326,7 @@ def connect_session(
     owner: Optional[str],
     workspace_path: str,
     port: int,
+    service_ports: object = None,
     entry_path: str = "/",
     chat_session_id: Optional[str] = None,
     name: Optional[str] = None,
@@ -288,6 +334,7 @@ def connect_session(
 ) -> dict:
     workspace = validate_workspace(workspace_path)
     port = validate_port(port)
+    services = normalize_service_ports(service_ports, primary_port=port)
     entry = normalize_entry_path(entry_path)
     normalized_owner = normalize_owner(owner)
     now = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -317,6 +364,7 @@ def connect_session(
                 owner=normalized_owner,
                 workspace_path=workspace,
                 port=port,
+                service_ports=json.dumps(services),
                 entry_path=entry,
                 name=(name or Path(workspace).name or "AgentIDE")[:160],
                 chat_session_id=chat_session_id,
@@ -325,6 +373,7 @@ def connect_session(
         else:
             record.workspace_path = workspace
             record.port = port
+            record.service_ports = json.dumps(services)
             record.entry_path = entry
             record.chat_session_id = chat_session_id or record.chat_session_id
             if name:
@@ -351,6 +400,7 @@ def start_static_session(
     chat_session_id: Optional[str] = None,
     name: Optional[str] = None,
     agent_ide_id: Optional[str] = None,
+    service_ports: object = None,
 ) -> dict:
     workspace = validate_workspace(workspace_path)
     selected_port = validate_port(port) if port else allocate_preview_port()
@@ -383,6 +433,7 @@ def start_static_session(
         chat_session_id=chat_session_id,
         name=name,
         agent_ide_id=agent_ide_id,
+        service_ports=service_ports,
     )
 
     log_dir = Path(DATA_DIR) / "agent_ide"

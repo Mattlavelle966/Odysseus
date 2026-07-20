@@ -90,7 +90,14 @@ class _FakeStream:
 def no_cache(monkeypatch, tmp_path):
     monkeypatch.setattr(content_mod, "CONTENT_CACHE_DIR", tmp_path)
     monkeypatch.setattr(content_mod, "_cache_result", lambda *a, **k: None)
-    monkeypatch.setattr(content_mod, "_public_http_url", lambda u: True)
+    # The production fetcher resolves once and pins the TCP transport to close
+    # DNS-rebinding races. Keep these size-cap tests network-free by supplying
+    # the public address that their mocked example.com stream represents.
+    monkeypatch.setattr(
+        content_mod,
+        "_resolve_public_ips",
+        lambda u: [content_mod.ipaddress.ip_address("93.184.216.34")],
+    )
 
 
 def _patch_stream(monkeypatch, fake):

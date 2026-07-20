@@ -14,6 +14,7 @@ import pytest
 
 from src import bg_jobs
 from src.agent_tools.bg_job_tools import ManageBgJobsTool
+import src.agent_tools.subprocess_tools as subprocess_tools
 from src.agent_tools.subprocess_tools import (
     BashTool,
     _has_unmanaged_background_operator,
@@ -38,7 +39,8 @@ async def test_bash_rejects_unmanaged_background_without_starting_process(
         raise AssertionError("subprocess must not start")
 
     monkeypatch.setattr(
-        "src.agent_tools.subprocess_tools.asyncio.create_subprocess_shell",
+        subprocess_tools.asyncio,
+        "create_subprocess_shell",
         fail_if_started,
     )
     result = await BashTool().execute(
