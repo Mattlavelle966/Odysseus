@@ -146,6 +146,70 @@ def test_buddy_reviews_final_path_and_returns_control_to_primary(monkeypatch):
     assert chunks[-1] == "data: [DONE]\n\n"
 
 
+def test_buddy_accepts_complete_final_without_forcing_another_round(monkeypatch):
+    monkeypatch.setattr(
+        agent_loop, "get_setting", lambda key, default=None: default, raising=False
+    )
+    monkeypatch.setattr(
+        agent_loop, "get_mcp_manager", lambda: None, raising=False
+    )
+    monkeypatch.setattr(
+        agent_loop, "estimate_tokens", lambda *_args, **_kwargs: 10, raising=False
+    )
+
+    primary_calls = []
+
+    async def fake_stream(_candidates, messages, **kwargs):
+        primary_calls.append(list(messages))
+        yield f'data: {json.dumps({"delta": "Verified final answer."})}\n\n'
+        yield "data: [DONE]\n\n"
+
+    async def fake_buddy(*args, **kwargs):
+        return "VERDICT: ACCEPT\nNEXT: Accept the verified candidate."
+
+    monkeypatch.setattr(
+        agent_loop, "stream_llm_with_fallback", fake_stream, raising=False
+    )
+    monkeypatch.setattr(
+        agent_loop, "_run_buddy_subagent", fake_buddy, raising=False
+    )
+
+    events = _events(
+        _collect(
+            agent_loop.stream_agent_loop(
+                "http://model.test/v1",
+                "test-model",
+                [{"role": "user", "content": "Explain the verified result"}],
+                max_rounds=3,
+                relevant_tools={"read_file"},
+                buddy_enabled=True,
+                buddy_endpoint_url="http://buddy.test/v1",
+                buddy_model="ornith-9b",
+                buddy_final_review=True,
+            )
+        )
+    )
+
+    assert len(primary_calls) == 1
+    assert any(
+        event.get("type") == "buddy_result"
+        and event.get("verdict") == "ACCEPT"
+        for event in events
+    )
+    assert not any(event.get("type") == "agent_step" for event in events)
+    assert any(
+        event.get("type") == "final_response"
+        and event.get("content") == "Verified final answer."
+        for event in events
+    )
+
+
+def test_buddy_verdict_defaults_legacy_notes_to_revision():
+    assert agent_loop._buddy_verdict("VERDICT: ACCEPT\nNEXT: Finish.") == "ACCEPT"
+    assert agent_loop._buddy_verdict("VERDICT: BLOCKED\nNEXT: Enable bash.") == "BLOCKED"
+    assert agent_loop._buddy_verdict("Check one more edge case.") == "REVISE"
+
+
 def test_buddy_ui_and_request_are_wired():
     html = (ROOT / "static" / "index.html").read_text()
     app_js = (ROOT / "static" / "app.js").read_text()
@@ -171,3 +235,5 @@ def test_buddy_ui_and_request_are_wired():
     assert "buddy_prompt=buddy_prompt" in route
     assert "resolve_endpoint_by_id" in route
     assert "buddy_endpoint_url=_buddy_endpoint_url" in route
+    assert 'json.type === \'final_response\'' in chat_js
+    assert 'data.get("type") == "final_response"' in route

@@ -154,6 +154,9 @@ DEFAULT_SETTINGS = {
     # protocol continuity, but is hidden from the UI unless explicitly enabled.
     "ornith_show_reasoning": False,
     "agent_max_rounds": 20,  # per-message agent step cap (clamped 1..1000)
+    # Effectful workspace turns have a separate safety cap so an operator's
+    # very high general round limit cannot produce an hours-long coding loop.
+    "agent_workspace_max_rounds": 40,
     # Soft input-token budget for the agent loop. The DEFAULT value (6000) is the
     # "auto" sentinel: it means "scale the budget to the model's context window"
     # (#1230) — so long-context models aren't capped at 6000. Set ANY OTHER value

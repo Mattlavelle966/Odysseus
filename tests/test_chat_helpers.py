@@ -423,6 +423,58 @@ def test_auto_name_session_passes_session_fallback_to_task_resolver(monkeypatch)
     assert updates == [("session-1", "Focused Fix")]
 
 
+def test_auto_name_session_uses_explicit_buddy_task_endpoint(monkeypatch):
+    import src.llm_core as llm_core
+    import src.task_endpoint as task_endpoint
+
+    monkeypatch.setattr(
+        task_endpoint,
+        "resolve_task_endpoint",
+        lambda *_args, **_kwargs: pytest.fail("task resolver should not replace explicit Buddy endpoint"),
+    )
+    llm_calls = []
+
+    async def fake_llm_call(url, model, messages, **kwargs):
+        llm_calls.append((url, model, kwargs))
+        return "Buddy Named Chat"
+
+    monkeypatch.setattr(llm_core, "llm_call_async", fake_llm_call)
+    sess = SimpleNamespace(
+        id="session-buddy",
+        owner="alice",
+        endpoint_url="http://primary.example/v1/chat/completions",
+        model="ornith-35b",
+        headers={},
+        history=[SimpleNamespace(role="user", content="Implement the application.")],
+    )
+    updates = []
+    session_manager = SimpleNamespace(
+        update_session_name=lambda session_id, title: updates.append((session_id, title))
+    )
+
+    asyncio.run(auto_name_session(
+        session_manager,
+        sess,
+        task_endpoint=(
+            "http://buddy.example/v1/chat/completions",
+            "ornith-9b",
+            {"Authorization": "buddy"},
+        ),
+    ))
+
+    assert llm_calls == [(
+        "http://buddy.example/v1/chat/completions",
+        "ornith-9b",
+        {
+            "temperature": 0.3,
+            "max_tokens": 4096,
+            "headers": {"Authorization": "buddy"},
+            "timeout": 60,
+        },
+    )]
+    assert updates == [("session-buddy", "Buddy Named Chat")]
+
+
 def test_spinoff_detected_from_dict_history():
     sess = SimpleNamespace(history=[
         {"role": "system", "metadata": {"research_spinoff_from": "rp-2"}},

@@ -23,7 +23,7 @@ _REQUIRED_NATIVE_TOOL_ARGS = {
     "web_search": ("query", "queries"),
     "web_fetch": ("url",),
     "read_file": ("path",),
-    "write_file": ("path",),
+    "write_file": ("path", "files"),
     "edit_file": ("path",),
     "agent_ide": ("action",),
 }
@@ -36,7 +36,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "bash",
-            "description": "Run a shell command (full access). Prefer a dedicated tool whenever one fits the job (reading, writing, editing, searching, or listing files); use bash only for what no dedicated tool covers (installs, git, builds, running programs, system info). Do NOT create or edit files via bash redirects/heredocs/sed -- use the dedicated file tools.",
+            "description": "Run a finite shell command (full access). Prefer dedicated file/search tools. For a development server, use agent_ide action=start/restart so it is detached, logged, and testable; never run node app.js/npm start/vite/uvicorn as a foreground shell command. For other long work, put #!bg on the first line. Do NOT create/edit files via redirects/heredocs/sed.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -165,15 +165,16 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "agent_ide",
-            "description": "Open and test a real workspace project in Odysseus with a live browser preview. Use connect for an existing local dev server, or serve_static for a plain HTML/CSS/JS folder. Register companion API/socket ports in service_ports. The preview is proxied through Odysseus, so no external port needs to be exposed; after connecting, browser tools can navigate, click, type, inspect, and screenshot the returned preview_url.",
+            "description": "Run, open, and test a real workspace project inside Odysseus. Use start with command+port for a project dev server, restart after code changes, connect only for an already-running server, request for status-aware internal HTTP/API tests (cookies persist), or serve_static for plain files. Register companion API/socket ports in service_ports. Never launch a dev server in foreground bash and never use curl -s as proof of HTTP success.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "action": {
                         "type": "string",
                         "enum": [
-                            "list", "connect", "serve_static", "open",
-                            "status", "refresh", "stop", "disconnect", "delete"
+                            "list", "connect", "start", "restart", "request",
+                            "serve_static", "open", "status", "refresh",
+                            "stop", "disconnect", "delete"
                         ]
                     },
                     "agent_ide_id": {
@@ -189,6 +190,10 @@ FUNCTION_TOOL_SCHEMAS = [
                         "minimum": 1024,
                         "maximum": 65535,
                         "description": "Loopback port used by the project server. Port 3001 is reserved."
+                    },
+                    "command": {
+                        "type": "string",
+                        "description": "Development server command for start/restart, such as npm start or node app.js. AgentIDE detaches it and captures logs."
                     },
                     "service_ports": {
                         "type": "array",
@@ -207,6 +212,37 @@ FUNCTION_TOOL_SCHEMAS = [
                     "name": {
                         "type": "string",
                         "description": "Optional display name for the project"
+                    },
+                    "method": {
+                        "type": "string",
+                        "enum": ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+                        "description": "HTTP method for action=request"
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Application path for action=request, such as /api/auth/me"
+                    },
+                    "query": {
+                        "type": "object",
+                        "description": "Optional query parameters for action=request"
+                    },
+                    "headers": {
+                        "type": "object",
+                        "description": "Optional request headers for action=request"
+                    },
+                    "json": {
+                        "description": "Optional JSON request body for action=request"
+                    },
+                    "body": {
+                        "type": "string",
+                        "description": "Optional raw request body for action=request"
+                    },
+                    "expected_status": {
+                        "description": "Expected HTTP status integer or list. Defaults to any 2xx/3xx response."
+                    },
+                    "follow_redirects": {
+                        "type": "boolean",
+                        "description": "Follow redirects for action=request (default false)"
                     }
                 },
                 "required": ["action"]
@@ -217,14 +253,27 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "write_file",
-            "description": "Write/save a file to disk",
+            "description": "Write/save one file, or batch several closely related files in one call with files=[{path,content}, ...]. Prefer a batch when creating a small feature across routes/pages/tests so the round budget is not wasted on one file per turn.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "File path to write to"},
-                    "content": {"type": "string", "description": "File content to write"}
+                    "content": {"type": "string", "description": "File content to write"},
+                    "files": {
+                        "type": "array",
+                        "maxItems": 12,
+                        "description": "Optional batch; use instead of path/content.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "path": {"type": "string"},
+                                "content": {"type": "string"}
+                            },
+                            "required": ["path", "content"]
+                        }
+                    }
                 },
-                "required": ["path", "content"]
+                "required": []
             }
         }
     },
@@ -1417,7 +1466,10 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
     elif tool_type == "get_workspace":
         content = ""
     elif tool_type == "write_file":
-        content = args.get("path", "") + "\n" + args.get("content", "")
+        if isinstance(args.get("files"), list):
+            content = json.dumps(args)
+        else:
+            content = args.get("path", "") + "\n" + args.get("content", "")
     elif tool_type == "edit_file":
         content = json.dumps(args)
     elif tool_type == "create_document":

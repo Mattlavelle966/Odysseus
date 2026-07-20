@@ -369,6 +369,7 @@ class AgentIDESession(TimestampMixin, Base):
     last_connected_at = Column(DateTime, nullable=True)
     managed_pid = Column(Integer, nullable=True)
     managed_log_path = Column(Text, nullable=True)
+    managed_command = Column(Text, nullable=True)
 
     __table_args__ = (
         Index(
@@ -2170,6 +2171,7 @@ def init_db():
     Base.metadata.create_all(bind=engine)
     _migrate_agent_ide_unique_index()
     _migrate_add_agent_ide_service_ports()
+    _migrate_add_agent_ide_managed_command()
     _migrate_add_session_workspace_path()
     # Lock the DB file (and any SQLite sidecars) to 0o600 — it holds bearer-token
     # + bcrypt hashes and encrypted provider keys. POSIX only; safe_chmod no-ops
@@ -2289,6 +2291,24 @@ def _migrate_add_agent_ide_service_ports():
             logger.info("Migrated: added agent_ide_sessions.service_ports")
     except Exception as exc:
         logger.warning("Could not add AgentIDE service ports: %s", exc)
+
+
+def _migrate_add_agent_ide_managed_command():
+    """Add the command used by a managed full-stack development server."""
+    try:
+        columns = {
+            column["name"]
+            for column in inspect(engine).get_columns("agent_ide_sessions")
+        }
+        if "managed_command" not in columns:
+            with engine.begin() as conn:
+                conn.execute(text(
+                    "ALTER TABLE agent_ide_sessions "
+                    "ADD COLUMN managed_command TEXT"
+                ))
+            logger.info("Migrated: added agent_ide_sessions.managed_command")
+    except Exception as exc:
+        logger.warning("Could not add AgentIDE managed command: %s", exc)
 
 
 def _migrate_add_session_workspace_path():

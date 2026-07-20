@@ -6,8 +6,8 @@ import re
 from typing import Optional, Callable, Awaitable, Tuple, Dict
 from src.constants import MAX_OUTPUT_CHARS
 
-DEFAULT_BASH_TIMEOUT = 60 * 60     # 1 hour
-DEFAULT_PYTHON_TIMEOUT = 60 * 60
+DEFAULT_BASH_TIMEOUT = 5 * 60
+DEFAULT_PYTHON_TIMEOUT = 5 * 60
 
 PROGRESS_INTERVAL_S = 2.0
 PROGRESS_TAIL_LINES = 12
@@ -21,6 +21,27 @@ _TRAILING_SHELL_BACKGROUND_RE = re.compile(
 def _has_unmanaged_background_operator(command: str) -> bool:
     """Detect a trailing shell ``&`` that can orphan a pipe-owning process."""
     return bool(_TRAILING_SHELL_BACKGROUND_RE.search(str(command or "")))
+
+
+_FOREGROUND_SERVER_RE = re.compile(
+    r"(?ix)"
+    r"(?:^|&&|;)\s*(?:"
+    r"node\s+(?!.*(?:--check|--test)\b)[^\n;&|]+\.js(?:\s|$)|"
+    r"npm\s+(?:start|run\s+(?:dev|serve|start))\b|"
+    r"(?:pnpm|yarn)\s+(?:dev|serve|start)\b|"
+    r"(?:npx\s+)?(?:vite|next\s+dev)\b|"
+    r"(?:python(?:3)?\s+-m\s+http\.server)\b|"
+    r"(?:uvicorn|gunicorn|flask\s+run)\b|"
+    r"(?:python(?:3)?\s+manage\.py\s+runserver)\b"
+    r")"
+)
+
+
+def _looks_like_foreground_server(command: str) -> bool:
+    text = str(command or "").strip()
+    if not text or text.lower().startswith("timeout "):
+        return False
+    return bool(_FOREGROUND_SERVER_RE.search(text))
 
 
 async def _run_subprocess_streaming(
@@ -124,6 +145,18 @@ class BashTool:
                     "finite foreground command."
                 ),
                 "exit_code": 2,
+            }
+        if _looks_like_foreground_server(content):
+            return {
+                "error": (
+                    "bash: this looks like a long-running development server. "
+                    "Use agent_ide with action='start' (command + port), which "
+                    "detaches the process, captures logs, and enables HTTP "
+                    "validation. If AgentIDE is unavailable, put #!bg on the "
+                    "first line instead of blocking the chat."
+                ),
+                "exit_code": 2,
+                "managed_process_required": True,
             }
         progress_cb = ctx.get("progress_cb")
         _subproc_env = ctx.get("subproc_env")

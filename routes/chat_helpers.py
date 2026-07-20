@@ -187,7 +187,7 @@ def needs_auto_name(name: str) -> bool:
     return False
 
 
-async def auto_name_session(session_manager, sess):
+async def auto_name_session(session_manager, sess, task_endpoint=None):
     """Generate a short title for a session from its first user message."""
     try:
         from src.llm_core import llm_call_async
@@ -210,9 +210,12 @@ async def auto_name_session(session_manager, sess):
             return
 
         owner = getattr(sess, "owner", None)
-        t_url, t_model, t_headers = resolve_task_endpoint(
-            sess.endpoint_url, sess.model, sess.headers, owner=owner
-        )
+        if task_endpoint and len(task_endpoint) == 3:
+            t_url, t_model, t_headers = task_endpoint
+        else:
+            t_url, t_model, t_headers = resolve_task_endpoint(
+                sess.endpoint_url, sess.model, sess.headers, owner=owner
+            )
         if not t_model:
             logger.debug("[auto-name] No model provided, skipping")
             return
@@ -1159,6 +1162,7 @@ def run_post_response_tasks(
     owner: str = None,
     extract_skills: bool = True,
     allow_background_extraction: bool = True,
+    task_endpoint=None,
 ):
     """Fire background tasks after a completed response: memory extraction, webhooks, auto-name, skill extraction.
 
@@ -1182,9 +1186,12 @@ def run_post_response_tasks(
     if allow_background_extraction and not incognito and not compare_mode and _should_extract and uprefs.get("auto_memory", True):
         from services.memory.memory_extractor import extract_and_store
         from src.task_endpoint import resolve_task_endpoint
-        t_url, t_model, t_headers = resolve_task_endpoint(
-            sess.endpoint_url, sess.model, sess.headers, owner=owner,
-        )
+        if task_endpoint and len(task_endpoint) == 3:
+            t_url, t_model, t_headers = task_endpoint
+        else:
+            t_url, t_model, t_headers = resolve_task_endpoint(
+                sess.endpoint_url, sess.model, sess.headers, owner=owner,
+            )
         _extraction_jobs.append(("memory", extract_and_store(
             sess, memory_manager, memory_vector,
             t_url, t_model, t_headers,
@@ -1220,9 +1227,12 @@ def run_post_response_tasks(
         else:
             from services.memory.skill_extractor import maybe_extract_skill
             from src.task_endpoint import resolve_task_endpoint
-            s_url, s_model, s_headers = resolve_task_endpoint(
-                sess.endpoint_url, sess.model, sess.headers, owner=owner,
-            )
+            if task_endpoint and len(task_endpoint) == 3:
+                s_url, s_model, s_headers = task_endpoint
+            else:
+                s_url, s_model, s_headers = resolve_task_endpoint(
+                    sess.endpoint_url, sess.model, sess.headers, owner=owner,
+                )
             logger.debug("[skill-extract] dispatching extractor (model=%s)", s_model)
             _extraction_jobs.append(("skill", maybe_extract_skill(
                 sess, skills_manager,
@@ -1247,4 +1257,8 @@ def run_post_response_tasks(
 
     # Auto-name
     if needs_auto_name(sess.name):
-        _spawn_bg(auto_name_session(session_manager, sess))
+        _spawn_bg(auto_name_session(
+            session_manager,
+            sess,
+            task_endpoint=task_endpoint,
+        ))

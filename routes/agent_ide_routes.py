@@ -68,7 +68,8 @@ class AgentIDEConnect(BaseModel):
 
 def _require_agent_ide_owner(request: Request) -> str:
     owner = require_user(request)
-    if not owner_is_admin_or_single_user(owner):
+    auth_manager = getattr(request.app.state, "auth_manager", None)
+    if not owner_is_admin_or_single_user(owner, auth_manager=auth_manager):
         raise HTTPException(status_code=403, detail="AgentIDE is admin-only")
     return owner
 

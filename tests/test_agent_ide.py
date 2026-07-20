@@ -199,6 +199,49 @@ def test_static_server_refuses_a_port_owned_by_another_process(
         )
 
 
+def test_managed_project_server_is_detached_logged_and_persisted(
+    ide_db,
+    monkeypatch,
+):
+    factory, workspace = ide_db
+    reachability = iter([False, False, True])
+    popen_calls = []
+
+    class FakePopen:
+        def __init__(self, command, **kwargs):
+            self.pid = 303
+            popen_calls.append((command, kwargs))
+
+    monkeypatch.setattr(agent_ide.subprocess, "Popen", FakePopen)
+    monkeypatch.setattr(
+        agent_ide,
+        "port_is_reachable",
+        lambda port, timeout=0.35: next(reachability, True),
+    )
+    monkeypatch.setattr(agent_ide, "pid_alive", lambda pid: pid == 303)
+
+    result = agent_ide.start_managed_session(
+        owner="admin",
+        workspace_path=str(workspace),
+        command="node app.js",
+        port=4100,
+        chat_session_id="chat-a",
+    )
+
+    assert result["reachable"] is True
+    assert result["managed"] is True
+    assert result["managed_command"] == "node app.js"
+    command, kwargs = popen_calls[0]
+    assert command == "node app.js"
+    assert kwargs["cwd"] == str(workspace.resolve())
+    assert kwargs["env"]["PORT"] == "4100"
+    with factory() as db:
+        record = db.query(AgentIDESession).one()
+        assert record.managed_pid == 303
+        assert record.managed_command == "node app.js"
+        assert record.managed_log_path.endswith(f"{record.id}.log")
+
+
 def test_stop_never_signals_an_unverified_reused_pid(ide_db, monkeypatch):
     factory, workspace = ide_db
     with factory() as db:
@@ -401,6 +444,75 @@ def test_agent_tool_opens_panel_only_after_persisted_connection(monkeypatch):
     assert result["agent_ide_id"] == "ide-1"
 
 
+def test_agent_tool_starts_managed_project_server(monkeypatch):
+    monkeypatch.setattr(
+        agent_ide,
+        "start_managed_session",
+        lambda **kwargs: {
+            "id": "ide-managed",
+            "name": "Site",
+            "workspace_path": kwargs["workspace_path"],
+            "port": kwargs["port"],
+            "reachable": True,
+        },
+    )
+    result = asyncio.run(
+        AgentIDETool().execute(
+            json.dumps({
+                "action": "start",
+                "workspace_path": "/workspace/site",
+                "command": "node app.js",
+                "port": 4100,
+            }),
+            {"owner": "admin", "session_id": "chat-a"},
+        )
+    )
+    assert result["result"] == "success"
+    assert result["agent_ide_id"] == "ide-managed"
+    assert result["action"] == "start"
+
+
+def test_agent_tool_http_request_requires_expected_status(monkeypatch):
+    record = SimpleNamespace(
+        id="ide-http",
+        port=4100,
+        service_ports="[]",
+    )
+    monkeypatch.setattr(agent_ide, "get_session", lambda owner, ide_id: record)
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def request(self, method, url, **kwargs):
+            request = httpx.Request(method, url)
+            return httpx.Response(404, text='{"error":"missing"}', request=request)
+
+    import src.agent_tools.agent_ide_tools as ide_tools
+    monkeypatch.setattr(ide_tools.httpx, "AsyncClient", FakeClient)
+
+    result = asyncio.run(
+        AgentIDETool().execute(
+            json.dumps({
+                "action": "request",
+                "agent_ide_id": "ide-http",
+                "path": "/api/auth/me",
+                "expected_status": 200,
+            }),
+            {"owner": "admin", "session_id": "chat-a"},
+        )
+    )
+    assert result["status_code"] == 404
+    assert result["exit_code"] == 1
+    assert result["result"] == "failed"
+
+
 @pytest.mark.parametrize(
     "message,workspace",
     [
@@ -427,6 +539,7 @@ def test_frontend_iframe_is_sandboxed_and_live_reload_is_revision_driven():
     assert "allow-same-origin" not in source
     assert "status.revision" in source
     assert "setInterval(poll, POLL_MS)" in source
+    assert "const POLL_MS = 3000" in source
     assert 'id="tool-agentide-btn"' in markup
     assert 'id="rail-agentide"' in markup
     assert 'id="agentide-services"' in source

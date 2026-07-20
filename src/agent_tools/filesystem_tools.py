@@ -193,14 +193,92 @@ class WriteFileTool:
         # path: there is no filesystem MCP server, so write_file always runs
         # here via _direct_fallback, not through _build_mcp_args.
         _stripped = content.strip()
+        _batch = None
         if _stripped.startswith("{"):
             try:
                 _a = json.loads(_stripped)
-                if isinstance(_a, dict) and "path" in _a:
-                    raw_path = str(_a.get("path", "")).strip()
-                    body = str(_a.get("content", ""))
+                if isinstance(_a, dict):
+                    if isinstance(_a.get("files"), list):
+                        _batch = _a["files"]
+                    elif "path" in _a:
+                        raw_path = str(_a.get("path", "")).strip()
+                        body = str(_a.get("content", ""))
             except (json.JSONDecodeError, TypeError, ValueError):
                 pass
+        if _batch is not None:
+            if not _batch or len(_batch) > 12:
+                return {
+                    "error": "write_file: files batch must contain 1 to 12 items",
+                    "exit_code": 1,
+                }
+            resolved = []
+            for index, item in enumerate(_batch):
+                if not isinstance(item, dict):
+                    return {
+                        "error": f"write_file: files[{index}] must be an object",
+                        "exit_code": 1,
+                    }
+                item_path = str(item.get("path") or "").strip()
+                if not item_path:
+                    return {
+                        "error": f"write_file: files[{index}].path is required",
+                        "exit_code": 1,
+                    }
+                try:
+                    path = _resolve_tool_path(item_path)
+                except ValueError as e:
+                    return {"error": f"write_file: {e}", "exit_code": 1}
+                resolved.append((path, str(item.get("content", ""))))
+
+            def _write_batch():
+                rows = []
+                for path, item_body in resolved:
+                    old = ""
+                    try:
+                        with open(path, "r", encoding="utf-8") as handle:
+                            old = handle.read()
+                    except (
+                        FileNotFoundError, IsADirectoryError,
+                        UnicodeDecodeError, OSError,
+                    ):
+                        old = ""
+                    directory = os.path.dirname(path)
+                    if directory:
+                        os.makedirs(directory, exist_ok=True)
+                    with open(path, "w", encoding="utf-8") as handle:
+                        handle.write(item_body)
+                    rows.append((path, old, item_body))
+                return rows
+
+            try:
+                rows = await asyncio.to_thread(_write_batch)
+            except PermissionError as exc:
+                return {
+                    "error": f"write_file: permission denied: {exc}",
+                    "exit_code": 1,
+                }
+            except OSError as exc:
+                return {"error": f"write_file: {exc}", "exit_code": 1}
+            summaries = [
+                f"{path} ({len(item_body)} bytes)"
+                for path, _old, item_body in rows
+            ]
+            result = {
+                "output": (
+                    f"Wrote {len(rows)} files:\n" + "\n".join(summaries)
+                ),
+                "exit_code": 0,
+                "files_written": [path for path, _old, _body in rows],
+            }
+            diffs = [
+                diff
+                for path, old, item_body in rows
+                if (diff := _unified_diff(old, item_body, path))
+            ]
+            if diffs:
+                result["diffs"] = diffs
+                result["diff"] = diffs[0]
+            return result
         try:
             path = _resolve_tool_path(raw_path)
         except ValueError as e:

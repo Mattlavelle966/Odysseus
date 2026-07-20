@@ -64,3 +64,33 @@ async def test_many_cancelled_waiters_leave_activity_gate_usable():
     assert all(isinstance(result, asyncio.CancelledError) for result in results)
     assert not gate._condition().locked()
     await asyncio.wait_for(gate.mark_browser_activity(), timeout=0.5)
+
+
+def test_agentide_status_poll_is_passive_but_mutations_are_foreground():
+    assert not gate.should_track_interactive_request(
+        "/api/agentide/sessions/site-a",
+        "GET",
+    )
+    assert not gate.should_track_interactive_request(
+        "/api/agentide/sessions",
+        "HEAD",
+    )
+    assert gate.should_track_interactive_request(
+        "/api/agentide/sessions",
+        "POST",
+    )
+    assert gate.should_track_interactive_request(
+        "/api/agentide/sessions/site-a",
+        "DELETE",
+    )
+
+
+def test_read_only_panel_polls_are_passive_but_note_mutations_are_foreground():
+    assert not gate.should_track_interactive_request("/api/notes", "GET")
+    assert not gate.should_track_interactive_request(
+        "/api/calendar/events", "GET"
+    )
+    assert not gate.should_track_interactive_request(
+        "/api/activity/heartbeat", "POST"
+    )
+    assert gate.should_track_interactive_request("/api/notes", "POST")

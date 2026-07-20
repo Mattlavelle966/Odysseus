@@ -1425,6 +1425,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
       if (streamingTTS) window.aiTTSManager.streamingStart();
       // Multi-bubble agent tracking
       let roundHolder = holder;       // Current AI text bubble (changes per round)
+      const turnTextBubbles = [holder]; // Progress bubbles replaced by canonical final_response
       let roundText = '';             // Text accumulated for current round
       let currentToolBubble = null;   // Current tool execution bubble
       let lastToolThread = null;      // Visible tool timeline for tool-only turns
@@ -1480,6 +1481,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         box.appendChild(newWrap);
         if (lastToolThread && lastToolThread.isConnected) lastToolThread.classList.add('has-bottom');
         roundHolder = newWrap;
+        turnTextBubbles.push(newWrap);
         roundText = '';
         roundFinalized = false;
       }
@@ -1832,7 +1834,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 typewriterInto(roundHolder.querySelector('.body'), errMsg);
                 break;
               }
-              if (json.delta || json.type === 'agent_prep' || json.type === 'tool_start' || json.type === 'tool_output' || json.type === 'tool_progress' || json.type === 'agent_step' || json.type === 'loop_breaker_triggered' || json.type === 'intent_nudge_exhausted' || json.type === 'doc_stream_open' || json.type === 'doc_stream_delta' || json.type === 'research_progress') {
+              if (json.delta || json.type === 'final_response' || json.type === 'agent_prep' || json.type === 'tool_start' || json.type === 'tool_output' || json.type === 'tool_progress' || json.type === 'agent_step' || json.type === 'loop_breaker_triggered' || json.type === 'intent_nudge_exhausted' || json.type === 'doc_stream_open' || json.type === 'doc_stream_delta' || json.type === 'research_progress') {
                 clearResponseTimeout();
                 clearProcessingProbe();
                 clearFirstTokenWaitTimers();
@@ -2437,6 +2439,31 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                   // collapsible on the user bubble — the user can view/edit
                   // it via the "Caption" button on the photo thumbnail.
                 }
+              } else if (json.type === 'final_response') {
+                // Agent progress is streamed across rounds for observability.
+                // The backend then sends the one answer that should remain in
+                // the transcript; replace progress prose without touching the
+                // tool timeline.
+                accumulated = String(json.content || '');
+                currentAccumulated = accumulated;
+                if (_isBg) {
+                  const bgFinal = _backgroundStreams.get(streamSessionId);
+                  if (bgFinal) bgFinal.accumulated = accumulated;
+                  continue;
+                }
+                _cancelThinkingTimer();
+                _removeThinkingSpinner();
+                const finalBubble = roundHolder || holder;
+                turnTextBubbles.forEach((bubble) => {
+                  if (bubble && bubble !== finalBubble) bubble.style.display = 'none';
+                });
+                finalBubble.style.display = '';
+                roundHolder = finalBubble;
+                roundText = accumulated;
+                const finalBody = roundHolder.querySelector('.body');
+                if (finalBody) finalBody.innerHTML = '';
+                _renderStream();
+
               } else if (json.type === 'rag_sources') {
                 if (_isBg) continue;
                 holder._ragSources = json.data;
@@ -2891,6 +2918,7 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 newWrap.appendChild(newBody);
                 box.appendChild(newWrap);
                 roundHolder = newWrap;
+                turnTextBubbles.push(newWrap);
                 roundText = '';
                 // Destroy any previous spinner before creating new one
                 if (spinner && spinner.element) spinner.destroy();

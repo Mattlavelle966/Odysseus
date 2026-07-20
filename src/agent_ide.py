@@ -11,6 +11,7 @@ import secrets
 import socket
 import subprocess
 import sys
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -193,6 +194,11 @@ def _serialize(record: AgentIDESession, *, reachable: Optional[bool] = None) -> 
             else None
         ),
         "managed": bool(record.managed_pid),
+        "managed_command": (
+            None
+            if not record.managed_command or record.managed_command == "__static__"
+            else record.managed_command
+        ),
         "reachable": reachable,
         "created_at": created_at.isoformat() + "Z",
         "updated_at": updated_at.isoformat() + "Z",
@@ -252,11 +258,27 @@ def managed_process_matches(record: AgentIDESession) -> bool:
             command = result.stdout
     except (OSError, subprocess.SubprocessError):
         return False
-    return (
-        "http.server" in command
-        and str(record.port) in command
-        and record.workspace_path in command
-    )
+    if record.managed_command == "__static__" or (
+        not record.managed_command and "http.server" in command
+    ):
+        return (
+            "http.server" in command
+            and str(record.port) in command
+            and record.workspace_path in command
+        )
+    if not record.managed_command:
+        return False
+    # A managed project server is launched with cwd=workspace and its own
+    # process group. Checking both cwd and a command prefix makes stale PID
+    # reuse much less likely to target an unrelated process.
+    try:
+        proc_cwd = Path(f"/proc/{pid}/cwd")
+        if proc_cwd.exists() and os.path.realpath(proc_cwd) != record.workspace_path:
+            return False
+    except OSError:
+        return False
+    first_word = record.managed_command.strip().split(None, 1)[0]
+    return bool(first_word and first_word in command)
 
 
 def workspace_revision(workspace_path: str) -> str:
@@ -470,11 +492,127 @@ def start_static_session(
             raise RuntimeError("AgentIDE session disappeared during startup")
         record.managed_pid = proc.pid
         record.managed_log_path = str(log_path)
+        record.managed_command = "__static__"
         record.status = "starting"
         record.last_error = None
         db.commit()
         db.refresh(record)
         return _serialize(record, reachable=False)
+
+
+def start_managed_session(
+    *,
+    owner: Optional[str],
+    workspace_path: str,
+    command: str,
+    port: int,
+    service_ports: object = None,
+    entry_path: str = "/",
+    chat_session_id: Optional[str] = None,
+    name: Optional[str] = None,
+    agent_ide_id: Optional[str] = None,
+) -> dict:
+    """Launch and supervise a workspace development server.
+
+    The process is detached from the chat request, writes to the AgentIDE log,
+    and is addressable through start/restart/status/stop. This is the supported
+    replacement for foreground ``node app.js`` or rejected ``nohup ... &``
+    shell calls.
+    """
+    workspace = validate_workspace(workspace_path)
+    selected_port = validate_port(port)
+    command = str(command or "").strip()
+    if not command:
+        raise ValueError("A development server command is required")
+    if "\x00" in command or len(command) > 4096:
+        raise ValueError("Development server command is invalid or too long")
+
+    previous = get_session(owner, agent_ide_id) if agent_ide_id else None
+    if previous is None:
+        previous = next(
+            (
+                get_session(owner, item["id"])
+                for item in list_sessions(owner)
+                if item["workspace_path"] == workspace
+            ),
+            None,
+        )
+    if previous and previous.managed_pid:
+        if managed_process_matches(previous):
+            kill_process_tree(previous.managed_pid)
+        deadline = time.monotonic() + 3.0
+        while port_is_reachable(previous.port) and time.monotonic() < deadline:
+            time.sleep(0.05)
+    if port_is_reachable(selected_port):
+        raise ValueError(
+            f"Port {selected_port} is already in use by an unmanaged service. "
+            "Connect to it, stop it explicitly, or choose another port."
+        )
+
+    result = connect_session(
+        owner=owner,
+        workspace_path=workspace,
+        port=selected_port,
+        service_ports=service_ports,
+        entry_path=entry_path,
+        chat_session_id=chat_session_id,
+        name=name,
+        agent_ide_id=agent_ide_id,
+    )
+    log_dir = Path(DATA_DIR) / "agent_ide"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"{result['id']}.log"
+    log_handle = log_path.open("ab")
+    env = os.environ.copy()
+    env["PORT"] = str(selected_port)
+    env.setdefault("HOST", "127.0.0.1")
+    try:
+        proc = subprocess.Popen(
+            command,
+            shell=True,
+            stdin=subprocess.DEVNULL,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            cwd=workspace,
+            env=env,
+            **detached_popen_kwargs(),
+        )
+    finally:
+        log_handle.close()
+
+    reachable = False
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline:
+        if not pid_alive(proc.pid):
+            break
+        if port_is_reachable(selected_port):
+            reachable = True
+            break
+        time.sleep(0.1)
+
+    with SessionLocal() as db:
+        record = _owner_query(db, owner).filter(
+            AgentIDESession.id == result["id"]
+        ).first()
+        if record is None:
+            kill_process_tree(proc.pid)
+            raise RuntimeError("AgentIDE session disappeared during startup")
+        record.managed_pid = proc.pid
+        record.managed_log_path = str(log_path)
+        record.managed_command = command
+        record.status = "running" if reachable else (
+            "starting" if pid_alive(proc.pid) else "failed"
+        )
+        record.last_error = None if pid_alive(proc.pid) else (
+            "The development server exited during startup"
+        )
+        if reachable:
+            record.last_connected_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        db.commit()
+        db.refresh(record)
+        payload = _serialize(record, reachable=reachable)
+        payload["log_tail"] = read_managed_log(owner, record.id, limit=8000)
+        return payload
 
 
 def session_status(owner: Optional[str], agent_ide_id: str) -> dict:

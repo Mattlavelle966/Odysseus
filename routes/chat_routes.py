@@ -1539,6 +1539,12 @@ def setup_chat_routes(
                                         full_response += data["delta"]
                                         _stream_set(session, partial=full_response)
                                     yield chunk
+                                elif data.get("type") == "final_response":
+                                    # Agent rounds stream useful live progress, but
+                                    # only this canonical terminal answer is saved.
+                                    full_response = str(data.get("content") or "").strip()
+                                    _stream_set(session, partial=full_response)
+                                    yield chunk
                                 elif data.get("type") == "web_sources":
                                     web_sources = data.get("data", [])
                                     yield chunk
@@ -1548,6 +1554,7 @@ def setup_chat_routes(
                                     "doc_update", "doc_suggestions", "ui_control",
                                     "rounds_exhausted", "budget_exceeded",
                                     "loop_breaker_triggered",
+                                    "capability_blocked",
                                     "progress_nudge",
                                     "intent_nudge_exhausted",
                                     "ask_user",
@@ -1617,6 +1624,11 @@ def setup_chat_routes(
                                     owner=_user,
                                     extract_skills=user_requested_agent,
                                     allow_background_extraction=not tool_policy.block_all_tool_calls,
+                                    task_endpoint=(
+                                        (_buddy_endpoint_url, _buddy_model, _buddy_headers or {})
+                                        if buddy_enabled and _buddy_endpoint_url and _buddy_model
+                                        else None
+                                    ),
                                 )
                             _stream_set(session, status="done")
                             yield chunk

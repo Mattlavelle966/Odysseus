@@ -39,6 +39,9 @@ try:
         _classify_agent_request,
         _compute_final_metrics,
         _append_tool_results,
+        _compact_native_tool_arguments,
+        _compact_tool_feedback,
+        _is_validation_call,
         _insert_before_latest_user,
         _MCP_KEYWORDS,
         _turn_requests_workspace_mutation,
@@ -115,6 +118,44 @@ def test_actionable_followup_inherits_recent_development_task():
         intent,
         messages[-1]["content"],
         workspace="/workspace/app",
+    )
+
+
+def test_complete_all_phases_inherits_development_and_requires_mutation():
+    messages = [
+        {
+            "role": "user",
+            "content": (
+                "Current phase: repository inspection only. Map the app now; "
+                "later phases will implement login, billing, and tests."
+            ),
+        },
+        {"role": "assistant", "content": "Inspection complete. Here is the map."},
+        {"role": "user", "content": "id like you to complete all phases."},
+    ]
+
+    intent = _classify_agent_request(messages, messages[-1]["content"])
+
+    assert intent["continuation"] is True
+    assert "files" in intent["domains"]
+    assert _turn_requests_workspace_mutation(
+        intent,
+        messages[-1]["content"],
+        workspace="/workspace/sypherdyne-site",
+    )
+
+
+def test_explicit_recon_only_phase_does_not_require_workspace_mutation():
+    message = (
+        "Current phase: reconnaissance only. Inspect the repository and report "
+        "what is broken. Later we will implement all fixes."
+    )
+    intent = _classify_agent_request([], message)
+
+    assert not _turn_requests_workspace_mutation(
+        intent,
+        message,
+        workspace="/workspace/sypherdyne-site",
     )
 
 
@@ -439,6 +480,39 @@ class TestAppendToolResultsNativeContent:
         assert messages[0]["content"] == "thinking..."
         assert messages[1]["role"] == "user"
         assert "tool output" in messages[1]["content"]
+
+    def test_large_write_body_is_not_replayed_into_every_round(self):
+        body = "x" * 12000
+        raw = '{"path":"public/app.js","content":"' + body + '"}'
+        compact = _compact_native_tool_arguments("write_file", raw)
+        assert len(compact) < 1000
+        assert "public/app.js" in compact
+        assert "12000 chars" in compact
+        assert body[:100] not in compact
+
+    def test_large_tool_feedback_keeps_head_and_tail(self):
+        raw = "HEAD" + ("m" * 12000) + "TAIL"
+        compact = _compact_tool_feedback(raw, limit=2000)
+        assert compact.startswith("HEAD")
+        assert compact.endswith("TAIL")
+        assert "compacted" in compact
+
+
+def test_validation_detection_rejects_plain_curl_exit_zero():
+    assert not _is_validation_call(
+        "bash", "curl -s http://localhost:4100/api/plans", {"exit_code": 0}
+    )
+    assert _is_validation_call(
+        "bash", "npm test", {"exit_code": 1}
+    )
+    assert _is_validation_call(
+        "bash", "curl -sf http://localhost:4100/api/plans", {"exit_code": 0}
+    )
+    assert _is_validation_call(
+        "agent_ide",
+        '{"action":"request","path":"/api/plans","expected_status":200}',
+        {"exit_code": 0},
+    )
 
 
 class TestAppendToolResultsThoughtSignature:

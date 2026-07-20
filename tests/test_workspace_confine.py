@@ -24,6 +24,7 @@ from src.tool_execution import (
     _resolve_tool_path,
     _resolve_tool_path_in_workspace,
     agent_cwd,
+    destructive_workspace_command_reason,
     execute_tool_block,
     get_active_workspace,
 )
@@ -66,6 +67,42 @@ def test_resolver_blocks_sensitive_inside_workspace(ws):
     os.makedirs(os.path.join(ws, ".ssh"), exist_ok=True)
     with pytest.raises(ValueError):
         _resolve_tool_path_in_workspace(ws, ".ssh/authorized_keys")
+
+
+def test_resolver_repairs_stale_host_and_container_paths(ws):
+    routes = os.path.join(ws, "routes")
+    os.makedirs(routes)
+    target = os.path.join(routes, "auth.js")
+    with open(target, "w") as handle:
+        handle.write("module.exports = {}")
+
+    assert _resolve_tool_path_in_workspace(
+        ws, "/app/routes/auth.js"
+    ) == os.path.realpath(target)
+    assert _resolve_tool_path_in_workspace(
+        ws, "/Users/example/OldProject/routes/auth.js"
+    ) == os.path.realpath(target)
+
+
+def test_persistent_database_deletion_is_blocked_but_temp_cleanup_is_allowed():
+    reason = destructive_workspace_command_reason(
+        "rm -f sypherdyne.db sypherdyne.db-shm sypherdyne.db-wal"
+    )
+    assert reason is not None
+    assert "persistent" in reason.lower()
+    assert destructive_workspace_command_reason("rm -rf /tmp/test-output") is None
+    assert destructive_workspace_command_reason("rm -rf dist") is None
+
+
+@pytest.mark.asyncio
+async def test_destructive_database_command_never_reaches_shell(ws, admin):
+    _, result = await execute_tool_block(
+        _block("bash", "rm -f app.sqlite app.sqlite-wal"),
+        owner="a",
+        workspace=ws,
+    )
+    assert result["exit_code"] == 2
+    assert result["safety_block"] == "persistent_data"
 
 
 # ── the central binding: the safety net ─────────────────────────────────
@@ -123,6 +160,25 @@ async def test_read_write_edit_confined_e2e(ws, admin):
     _, r = await execute_tool_block(_block("write_file", f"{escape}\nx"), owner="a", workspace=ws)
     assert r["exit_code"] == 1 and "outside the workspace" in r["error"]
     assert not os.path.exists(escape)
+
+
+@pytest.mark.asyncio
+async def test_write_file_batches_related_files_in_one_tool_call(ws, admin):
+    payload = {
+        "files": [
+            {"path": "routes/auth.js", "content": "module.exports = {};"},
+            {"path": "tests/auth.test.js", "content": "test('auth', () => {});"},
+        ]
+    }
+    _, result = await execute_tool_block(
+        _block("write_file", json.dumps(payload)),
+        owner="a",
+        workspace=ws,
+    )
+    assert result["exit_code"] == 0
+    assert len(result["files_written"]) == 2
+    assert os.path.isfile(os.path.join(ws, "routes", "auth.js"))
+    assert os.path.isfile(os.path.join(ws, "tests", "auth.test.js"))
 
 
 @pytest.mark.asyncio

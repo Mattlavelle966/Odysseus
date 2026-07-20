@@ -224,8 +224,60 @@ def _resolve_tool_path_in_workspace(workspace: str, raw_path: str) -> str:
             if os.path.commonpath([os.path.normcase(resolved), nbase]) != nbase:
                 raise ValueError
         except ValueError:
-            raise ValueError(f"path '{raw_path}' is outside the workspace ({workspace})")
+            repaired = _repair_workspace_path(base, expanded)
+            if repaired is None:
+                raise ValueError(
+                    f"path '{raw_path}' is outside the workspace. "
+                    f"Use a path relative to {base}, or the canonical absolute "
+                    f"workspace path {base}."
+                )
+            resolved = repaired
     return resolved
+
+
+def _repair_workspace_path(workspace: str, raw_path: str) -> Optional[str]:
+    """Repair a stale host/container absolute path into the active workspace.
+
+    Local models often copy a path from an old host prompt (``/Users/...``) or
+    assume the container root is ``/app``. When a workspace is explicitly
+    bound, the useful part is normally the suffix (``routes/auth.js``). Prefer
+    the longest suffix that already exists; for a new file, accept the longest
+    suffix whose parent exists. Never repair a sensitive path.
+    """
+    if not os.path.isabs(raw_path):
+        return None
+    normalized_raw = raw_path.replace("\\", "/")
+    if not normalized_raw.startswith(
+        ("/app/", "/workspace/", "/Users/", "/home/")
+    ):
+        return None
+    base = os.path.realpath(workspace)
+    parts = [part for part in pathlib.PurePath(raw_path).parts if part not in {os.sep, ""}]
+    existing: list[tuple[int, str]] = []
+    creatable: list[tuple[int, str]] = []
+    for start in range(len(parts)):
+        suffix = parts[start:]
+        if not suffix:
+            continue
+        candidate = os.path.realpath(os.path.join(base, *suffix))
+        try:
+            if os.path.commonpath([candidate, base]) != base:
+                continue
+        except ValueError:
+            continue
+        if _is_sensitive_path(candidate):
+            continue
+        score = len(suffix)
+        if os.path.exists(candidate):
+            existing.append((score, candidate))
+        elif os.path.isdir(os.path.dirname(candidate)):
+            creatable.append((score, candidate))
+    choices = existing or creatable
+    if not choices:
+        return None
+    repaired = max(choices, key=lambda item: item[0])[1]
+    logger.info("Repaired stale workspace path %r -> %r", raw_path, repaired)
+    return repaired
 
 
 
@@ -303,6 +355,64 @@ def _resolve_search_root(raw_path: str) -> str:
     return _resolve_tool_path(raw)
 
 logger = logging.getLogger(__name__)
+
+
+_PERSISTENT_DATA_SUFFIX_RE = re.compile(
+    r"(?i)(?:^|/)(?:[^/\s;&|]+?\.)?(?:db|sqlite|sqlite3)"
+    r"(?:-(?:wal|shm|journal))?[*?]?(?:$|[\s;&|])"
+)
+_DESTRUCTIVE_SHELL_RE = re.compile(
+    r"(?is)(?:^|[;&|]\s*)"
+    r"(?:sudo\s+)?(?:rm|unlink)\s+(?:-[^\s]+\s+)*([^\n;&|]+)"
+)
+_DROP_DATABASE_RE = re.compile(
+    r"(?i)\b(?:drop\s+(?:database|table)|delete\s+from\s+sqlite_master)\b"
+)
+_FIND_DELETE_DATABASE_RE = re.compile(
+    r"(?is)\bfind\b[^\n;&|]*\b-name\b[^\n;&|]*"
+    r"(?:\.db|\.sqlite|\.sqlite3)[*?'\"\s]*[^\n;&|]*\b-delete\b"
+)
+
+
+def destructive_workspace_command_reason(command: str) -> Optional[str]:
+    """Return a safety explanation for destructive persistent-data commands.
+
+    This is a semantic backstop for coding agents. It intentionally targets
+    durable application state rather than generic ``rm`` so normal build/test
+    cleanup remains available. Files under the system temp directory are
+    exempt; workspace databases are not.
+    """
+    text = str(command or "")
+    if not text.strip():
+        return None
+    if _DROP_DATABASE_RE.search(text):
+        return (
+            "Destructive database/schema reset blocked. Preserve application "
+            "data and use the project's migration pattern instead."
+        )
+    if _FIND_DELETE_DATABASE_RE.search(text):
+        return (
+            "Bulk deletion of workspace database files was blocked. Preserve "
+            "existing records and use a migration or an isolated temporary "
+            "test database."
+        )
+    for match in _DESTRUCTIVE_SHELL_RE.finditer(text):
+        operands = match.group(1)
+        for token in re.split(r"\s+", operands.strip()):
+            cleaned = token.strip("'\"")
+            if not cleaned or cleaned.startswith("-"):
+                continue
+            if cleaned.startswith(("/tmp/", "${TMPDIR}", "$TMPDIR")):
+                continue
+            normalized = cleaned.replace("\\", "/")
+            if _PERSISTENT_DATA_SUFFIX_RE.search(normalized + " "):
+                return (
+                    f"Destructive removal of persistent application data "
+                    f"({cleaned}) was blocked. Back up the database and apply "
+                    "a non-destructive migration; do not reset verified users "
+                    "or existing records."
+                )
+    return None
 
 
 _ADMIN_TOOLS = {
@@ -711,6 +821,22 @@ async def _execute_tool_block_impl(
         logger.warning("Public tool policy blocked owner=%r tool=%s", owner, tool)
         return desc, result
 
+    if tool == "bash":
+        destructive_reason = destructive_workspace_command_reason(content)
+        if destructive_reason:
+            logger.warning(
+                "Blocked destructive workspace command owner=%r command=%r",
+                owner,
+                content[:500],
+            )
+            return (
+                "bash: BLOCKED destructive persistent-data operation",
+                {
+                    "error": destructive_reason,
+                    "exit_code": 2,
+                    "safety_block": "persistent_data",
+                },
+            )
 
     # Background execution: a `bash` block whose first line is the `#!bg`
     # marker runs DETACHED — returns a job id immediately so the chat stream

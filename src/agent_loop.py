@@ -8,6 +8,7 @@ The LLM decides when to use tools by writing fenced code blocks.
 
 import asyncio
 import collections
+import hashlib
 import json
 import random
 import re
@@ -171,6 +172,9 @@ _API_AGENT_RULES = """\
 - BIAS TOWARD ACTION on edit requests. If the user says "edit out X", "remove the Y paragraph", "change Z" — call the edit tool with your best interpretation. Don't ask for clarification on minor ambiguity. The user can undo.
 - AFTER A TOOL SUCCEEDS, do not second-guess. A success response means it worked. Reply in ONE short sentence confirming what was done. No verification thinking, no re-analyzing — move on.
 - AFTER A TOOL FAILS, DO NOT GO SILENT. The user expects a follow-up: retry with a fix, run a diagnostic (`tail`, `ls`, `which`), or explicitly tell them what didn't work and what you'll try next. Failure is not a stopping condition.
+- WORKSPACE PATHS: when an active workspace is provided, use relative paths or its exact canonical path. Never guess `/app`, `/Users/...`, or another host path.
+- DEVELOPMENT SERVERS: use `agent_ide` action=`start`/`restart` with command+port. Never run a dev server as foreground bash, `nohup`, or trailing `&`. Use `agent_ide` action=`request` with `expected_status` for API checks; plain `curl -s` exit 0 does not prove an HTTP route succeeded.
+- DATA SAFETY: preserve existing databases and user records. Apply migrations; never delete/reset `.db`/SQLite files to make startup or tests pass.
 - YOU DECLARE WHEN THE JOB IS DONE — not a timer. Keep taking concrete steps while the task still needs them; don't quit early just because you've made a few calls. Three ways to end a turn: (1) DONE — before declaring it, verify every concrete deliverable the user asked for actually exists or succeeded; then stop calling tools and write the final answer (that IS your "done" signal); (2) BLOCKED — you can't proceed (missing capability, permission denied, unobtainable data), so state plainly what's blocking you and stop; (3) keep going with the single most useful next step. Never trail off mid-task without (1) or (2), and never repeat a call you already ran.
 - Calendar: call `manage_calendar` with `action=list_calendars` FIRST before create/update/delete operations.
 - "Create/add/write a note" / "notes" / "todos" / "remind me to X at <time>" → use `manage_notes`. Do NOT store notes in `manage_memory`; memory is for persistent facts/preferences about the user, not note content. For reminders, include a `due_date`; for todos, use `note_type=checklist` when appropriate. `manage_tasks` is for RECURRING background AI jobs, NOT for one-off user reminders.
@@ -401,7 +405,7 @@ Read a file and return its contents.""",
 <file path>
 <file contents>
 ```
-Write content to a file. First line is the path, rest is the content.""",
+Write content to one file. First line is the path, rest is the content. Native-tool models may instead send `{"files":[{"path":"...","content":"..."}, ...]}` to create up to 12 closely related files in one call; prefer that for a small feature spanning routes/pages/tests.""",
 
     "edit_file": """\
 ```edit_file
@@ -416,9 +420,9 @@ Return the absolute path of the active workspace folder. File tools are CONFINED
 
     "agent_ide": """\
 ```agent_ide
-{"action":"connect|serve_static|open|status|refresh|stop|delete","workspace_path":"/workspace/project","port":4173,"entry_path":"/"}
+{"action":"start|restart|request|connect|serve_static|open|status|refresh|stop|delete","workspace_path":"/workspace/project","command":"npm start","port":4173,"path":"/api/health","expected_status":200}
 ```
-Open a REAL workspace web project in the docked AgentIDE live-preview panel. Use `connect` after starting the project's own server on a loopback port with a background bash job. Use `serve_static` for plain HTML/CSS/JS folders (port is optional). Keep editing the same workspace files; never create duplicate editor documents as project versions. `open`, `status`, `refresh`, `stop`, and `delete` take `agent_ide_id`. Completion requires a successful AgentIDE tool result, not merely saying a preview is available.""",
+Open and test a REAL workspace web project in the docked AgentIDE panel. Use `start` with command+port for the project's server; AgentIDE detaches it and captures logs. Use `restart` after code changes, and `request` for status-aware internal HTTP tests with persistent cookies. Use `connect` only when a server is already running, and `serve_static` for plain HTML/CSS/JS. Never run a dev server in foreground bash and never treat plain `curl -s` exit 0 as HTTP success. Keep editing the same workspace files; never create duplicate editor documents as project versions. Completion requires successful validation and AgentIDE results.""",
 
     "create_document": """\
 ```create_document
@@ -915,7 +919,7 @@ _CONTEXTUAL_ACTION_CONTINUATION_RE = re.compile(
     r"\b(?:implement|apply|make|finish|complete|continue|do|fix|build|add|"
     r"change|update|test|run|launch|start|restart|refresh|ship)\b"
     r"[^.\n]{0,80}\b(?:all\s+of\s+)?(?:that|those|this|these|it|them|"
-    r"everything|the\s+rest|the\s+changes?|the\s+ideas?|the\s+plan|"
+    r"everything|(?:all\s+)?phases?|the\s+rest|the\s+changes?|the\s+ideas?|the\s+plan|"
     r"the\s+above|previous(?:ly)?(?:\s+mentioned)?)\b",
     re.IGNORECASE,
 )
@@ -1237,6 +1241,17 @@ _WORKSPACE_MUTATION_RE = re.compile(
     re.IGNORECASE,
 )
 
+_READ_ONLY_PHASE_RE = re.compile(
+    r"(?:"
+    r"\bcurrent\s+phase\s*:\s*(?:reconnaissance|inspection|review)\s+only\b"
+    r"|\b(?:reconnaissance|inspection)\s+only\b"
+    r"|\bread[- ]only\s+(?:phase|turn|inspection|reconnaissance)\b"
+    r"|\bend\s+(?:this\s+)?turn\s+(?:immediately\s+)?after\s+"
+    r"(?:the\s+)?(?:factual\s+)?(?:map|report|inspection|reconnaissance)\b"
+    r")",
+    re.IGNORECASE,
+)
+
 
 def _turn_requests_workspace_mutation(
     intent: Dict[str, object],
@@ -1247,6 +1262,11 @@ def _turn_requests_workspace_mutation(
     if not workspace:
         return False
     text = str(last_user or "").strip()
+    # Prompts often describe later implementation phases after declaring the
+    # current turn reconnaissance-only. Future action verbs must not make the
+    # progress supervisor demand a write during an explicitly read-only phase.
+    if _READ_ONLY_PHASE_RE.search(text):
+        return False
     return bool(
         _WORKSPACE_MUTATION_RE.search(text)
         and (
@@ -2467,7 +2487,10 @@ def _append_tool_results(
                 "type": "function",
                 "function": {
                     "name": tc.get("name", ""),
-                    "arguments": tc.get("arguments", "{}"),
+                    "arguments": _compact_native_tool_arguments(
+                        tc.get("name", ""),
+                        tc.get("arguments", "{}"),
+                    ),
                 },
                 # Gemini 3 requires the opaque thought_signature it returned with
                 # each function call to be echoed back on the follow-up turn, or
@@ -2483,10 +2506,12 @@ def _append_tool_results(
             messages.append({
                 "role": "tool",
                 "tool_call_id": tc.get("id", f"call_{round_num}_{j}"),
-                "content": result_text,
+                "content": _compact_tool_feedback(result_text),
             })
     else:
-        tool_output_text = "\n\n".join(tool_results)
+        tool_output_text = "\n\n".join(
+            _compact_tool_feedback(item) for item in tool_results
+        )
         msg = {"role": "assistant", "content": round_response}
         if round_reasoning:
             msg["reasoning_content"] = round_reasoning
@@ -2500,6 +2525,75 @@ def _append_tool_results(
         messages.append(
             untrusted_context_message("tool execution results", tool_output_text)
         )
+
+
+def _compact_tool_feedback(text: str, limit: int = 8000) -> str:
+    """Bound model-facing tool output while preserving useful head and tail.
+
+    Live UI/history events retain their normal bounded output. This only trims
+    the copy replayed into every later model round, which otherwise makes a
+    batch of full-file reads permanently consume the context window.
+    """
+    value = str(text or "")
+    if len(value) <= limit:
+        return value
+    half = max(1000, (limit - 160) // 2)
+    return (
+        value[:half]
+        + f"\n\n...[model feedback compacted: {len(value)} chars total]...\n\n"
+        + value[-half:]
+    )
+
+
+def _compact_native_tool_arguments(name: str, raw: str) -> str:
+    """Remove large file bodies from historical native tool-call messages."""
+    value = str(raw or "{}")
+    if len(value) <= 3000:
+        return value
+    try:
+        args = json.loads(value)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return _compact_tool_feedback(value, limit=3000)
+    if not isinstance(args, dict):
+        return _compact_tool_feedback(value, limit=3000)
+    changed = False
+    if name == "write_file" and isinstance(args.get("content"), str):
+        body = args["content"]
+        args["content"] = (
+            f"<written content omitted: {len(body)} chars, "
+            f"sha256={hashlib.sha256(body.encode('utf-8')).hexdigest()[:16]}>"
+        )
+        changed = True
+    elif name == "write_file" and isinstance(args.get("files"), list):
+        compact_files = []
+        for item in args["files"]:
+            if not isinstance(item, dict):
+                compact_files.append(item)
+                continue
+            compact_item = dict(item)
+            body = compact_item.get("content")
+            if isinstance(body, str):
+                compact_item["content"] = (
+                    f"<written content omitted: {len(body)} chars, "
+                    f"sha256={hashlib.sha256(body.encode('utf-8')).hexdigest()[:16]}>"
+                )
+                changed = True
+            compact_files.append(compact_item)
+        args["files"] = compact_files
+    elif name == "edit_file":
+        for key in ("old_string", "new_string"):
+            body = args.get(key)
+            if isinstance(body, str) and len(body) > 1200:
+                args[key] = (
+                    body[:400]
+                    + f"\n<...{key} compacted: {len(body)} chars, "
+                    f"sha256={hashlib.sha256(body.encode('utf-8')).hexdigest()[:16]}...>\n"
+                    + body[-400:]
+                )
+                changed = True
+    if not changed:
+        return _compact_tool_feedback(value, limit=3000)
+    return json.dumps(args, ensure_ascii=False, separators=(",", ":"))
 
 
 def _compute_final_metrics(
@@ -2586,6 +2680,35 @@ _WORKSPACE_MUTATING_TOOLS = {
     "write_file", "edit_file", "append_file", "replace_file",
 }
 _VERIFIER_MAX_ROUNDS = 2  # cap re-verify cycles per turn — never loop forever
+_VALIDATION_COMMAND_RE = re.compile(
+    r"(?ix)\b(?:"
+    r"pytest|unittest|npm\s+(?:test|run\s+(?:test|lint|build|check))|"
+    r"pnpm\s+(?:test|run\s+(?:test|lint|build|check))|"
+    r"yarn\s+(?:test|lint|build)|node\s+--(?:test|check)|"
+    r"deno\s+(?:test|check)|cargo\s+(?:test|check)|go\s+test|"
+    r"mvn\s+test|gradle\s+test|dotnet\s+test|"
+    r"tsc\b[^\n]*(?:--noemit|--build)|"
+    r"ruff\s+check|eslint\b|shellcheck\b|"
+    r"curl\b[^\n]*(?:-[^\s]*f|--fail)"
+    r")\b"
+)
+
+
+def _is_validation_call(tool_name: str, content: str, result: dict) -> bool:
+    """Recognize structured or status-aware validation, not arbitrary exit 0."""
+    if tool_name == "agent_ide":
+        try:
+            args = json.loads(content or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            args = {}
+        return (
+            isinstance(args, dict)
+            and str(args.get("action") or "").lower()
+            in {"request", "http_request", "test"}
+        )
+    if tool_name != "bash":
+        return False
+    return bool(_VALIDATION_COMMAND_RE.search(str(content or "")))
 
 
 def _build_actions_snapshot(tool_events: list, limit: int = 8000) -> str:
@@ -2767,6 +2890,20 @@ def _buddy_cadence_interval(cadence: str) -> Optional[tuple]:
     }.get(str(cadence or "").lower(), (10, 20))
 
 
+def _buddy_verdict(advice: str) -> str:
+    """Return Buddy's structured decision, preserving legacy behavior.
+
+    Older/custom Buddy prompts may omit the verdict line. Treat those notes as
+    revision advice so existing configurations keep working; an explicit
+    ACCEPT is required to skip another primary-model round.
+    """
+    match = re.search(
+        r"(?im)^\s*VERDICT\s*:\s*(ACCEPT|REVISE|BLOCKED)\b",
+        str(advice or "")[:800],
+    )
+    return match.group(1).upper() if match else "REVISE"
+
+
 async def _run_buddy_subagent(
     instruction: str,
     actions_snapshot: str,
@@ -2827,7 +2964,11 @@ async def _run_buddy_subagent(
         "recommend swapping localhost for 127.0.0.1 as a network-boundary fix; "
         "it cannot cross that boundary. The browser should call a same-origin "
         "Odysseus endpoint and the application layer should proxy the request. Keep the "
-        "note under 220 words and lead with exactly one `NEXT:` line. If the "
+        "note under 220 words. The first line MUST be exactly one of "
+        "`VERDICT: ACCEPT`, `VERDICT: REVISE`, or `VERDICT: BLOCKED`. Use "
+        "ACCEPT only when the candidate is complete and supported by the "
+        "recorded actions. Use BLOCKED when the primary lacks a required "
+        "capability, and name it. Put exactly one `NEXT:` line second. If the "
         "consultation reason is a progress stall, generic ls/find/grep or broad "
         "re-reading is a rejected answer: either propose a supported mutation "
         "or name the exact missing file/expression/result that blocks one."
@@ -3524,6 +3665,40 @@ async def stream_agent_loop(
                 _removed_doc_file_tools,
             )
 
+    # Effectful workspace turns have a non-negotiable capability floor. Tool
+    # retrieval is advisory; it must never crowd out the inspect→edit→test
+    # chain that makes an implementation request executable. This also repairs
+    # terse continuations whose embedding query mostly resembles planning.
+    _workspace_core_tools = {
+        "bash", "read_file", "write_file", "edit_file",
+    }
+    _workspace_toolchain_missing: Set[str] = set()
+    if _workspace_mutation_request and not guide_only:
+        if _relevant_tools is None:
+            from src.tool_index import ALWAYS_AVAILABLE
+            _relevant_tools = set(ALWAYS_AVAILABLE)
+        _relevant_tools.update(_workspace_core_tools)
+        _workspace_capability_groups = {
+            "read_file/bash": {"read_file", "bash"},
+            "write_file/edit_file": {"write_file", "edit_file"},
+            "bash validation": {"bash"},
+        }
+        _workspace_toolchain_missing = {
+            label
+            for label, alternatives in _workspace_capability_groups.items()
+            if alternatives.issubset(disabled_tools)
+        }
+        if _workspace_toolchain_missing:
+            logger.warning(
+                "[agent-intent] effectful workspace request is blocked by disabled core tools=%s",
+                sorted(_workspace_toolchain_missing),
+            )
+        else:
+            logger.info(
+                "[agent-intent] effectful workspace preflight satisfied core_tools=%s",
+                sorted(_workspace_core_tools),
+            )
+
     if _relevant_tools is not None:
         logger.info("[agent-intent] selected_tools=%s", sorted(_relevant_tools)[:50])
 
@@ -3615,6 +3790,22 @@ async def stream_agent_loop(
         suppress_skills=_low_signal_turn,
         active_email=active_email,
     )
+    if workspace and not guide_only:
+        messages = _insert_before_latest_user(
+            messages,
+            {
+                "role": "system",
+                "content": (
+                    f"CANONICAL ACTIVE WORKSPACE: {workspace}\n"
+                    "All file paths should be relative to this directory, or "
+                    "use this exact absolute prefix. Do not guess /app, /Users, "
+                    "or another host path. The shell already starts in this "
+                    "directory. Preserve existing persistent data: use "
+                    "migrations and backups; never delete/reset workspace "
+                    "database files to make a test pass."
+                ),
+            },
+        )
     if _ornith_profile and not guide_only:
         _ornith_allowed = set(
             _relevant_tools or {"ask_user", "update_plan"}
@@ -3651,6 +3842,12 @@ async def stream_agent_loop(
             )
         _ornith_allowed_names_for_turn = set(_ornith_allowed)
         _ornith_objective = _last_user
+        if workspace:
+            _ornith_objective = (
+                f"Canonical active workspace: {workspace}. Use paths relative "
+                "to it; do not guess a host/container path. Preserve existing "
+                f"database files and records.\n\n{_ornith_objective}"
+            )
         if _new_preview_document_request:
             _ornith_objective = (
                 "Create exactly one self-contained HTML editor document with "
@@ -3806,7 +4003,35 @@ async def stream_agent_loop(
     )
     yield f"data: {json.dumps({'type': 'agent_prep', 'data': {k: round(v, 3) for k, v in prep_timings.items()}})}\n\n"
 
+    if _workspace_toolchain_missing:
+        _missing = ", ".join(sorted(_workspace_toolchain_missing))
+        _capability_failure = (
+            "I couldn't start the requested workspace implementation because "
+            f"required development tools are disabled: {_missing}. No files "
+            "were changed."
+        )
+        yield (
+            "data: "
+            + json.dumps({
+                "type": "capability_blocked",
+                "reason": "workspace_toolchain_disabled",
+                "missing_tools": sorted(_workspace_toolchain_missing),
+                "message": _capability_failure,
+            })
+            + "\n\n"
+        )
+        yield f"data: {json.dumps({'delta': _capability_failure})}\n\n"
+        yield f"data: {json.dumps({'type': 'final_response', 'content': _capability_failure})}\n\n"
+        yield f"data: {json.dumps({'type': 'metrics', 'data': {'response_time': 0, 'input_tokens': 0, 'output_tokens': max(len(_capability_failure) // 4, 1), 'total_tokens': max(len(_capability_failure) // 4, 1), 'agent_rounds': 0, 'tool_calls': 0, 'workspace_mutations': 0, 'validation_calls': 0, 'model': model, 'requested_model': model}})}\n\n"
+        yield "data: [DONE]\n\n"
+        return
+
     full_response = ""
+    _accepted_final_response = ""
+    _force_answer_failure = (
+        "I couldn't complete the task because the agent repeated actions "
+        "without making verifiable progress. No additional work was claimed."
+    )
     total_start = time.time()
     time_to_first_token = None
     first_token_received = False
@@ -3816,6 +4041,13 @@ async def stream_agent_loop(
     # a tool that produces a checkable artifact runs; the verifier only fires
     # on such turns and at most _VERIFIER_MAX_ROUNDS times.
     _effectful_used = False
+    _workspace_mutation_count = 0
+    _validation_call_count = 0
+    _validation_attempt_count = 0
+    _failed_tool_count = 0
+    _destructive_block_count = 0
+    _first_mutation_round = 0
+    _round_prompt_tokens: list[int] = []
     _rounds_without_workspace_mutation = 0
     _verifier_rounds = 0
     _verifier_instruction = _resolved_task_brief(
@@ -3911,12 +4143,40 @@ async def stream_agent_loop(
     )
     _buddy_last_round = 0
     _buddy_final_review_done = False
-    # Buddy's final review earns one response round beyond the normal cap so
-    # enabling the feature at a tight cap never produces advice the primary
-    # agent has no opportunity to use.
-    _loop_max_rounds = max_rounds + (
-        1 if buddy_enabled and buddy_final_review else 0
+    _effective_max_rounds = max_rounds
+    if _workspace_mutation_request:
+        try:
+            _workspace_round_cap = int(
+                get_setting("agent_workspace_max_rounds", 40) or 40
+            )
+        except (TypeError, ValueError):
+            _workspace_round_cap = 40
+        _workspace_round_cap = max(12, min(_workspace_round_cap, 200))
+        _effective_max_rounds = min(max_rounds, _workspace_round_cap)
+        if _effective_max_rounds < max_rounds:
+            logger.info(
+                "[agent] workspace round safety cap applied configured=%d effective=%d",
+                max_rounds,
+                _effective_max_rounds,
+            )
+    # Effectful workspace runs always receive one deterministic answer-only
+    # finalization round. Buddy uses the same reserve when enabled.
+    _has_finalization_round = bool(
+        _workspace_mutation_request
+        or (buddy_enabled and buddy_final_review)
     )
+    _loop_max_rounds = _effective_max_rounds + (
+        1 if _has_finalization_round else 0
+    )
+    _validation_gate_round = max(
+        4, int(_effective_max_rounds * 0.70)
+    )
+    _finalization_nudge_round = max(
+        _validation_gate_round + 1,
+        int(_effective_max_rounds * 0.85),
+    )
+    _validation_gate_nudged = False
+    _finalization_nudged = False
 
     for round_num in range(1, _loop_max_rounds + 1):
         round_response = ""
@@ -3932,6 +4192,90 @@ async def stream_agent_loop(
         # fenced block closes we advance this so the next iteration can
         # detect a SUBSEQUENT block in the same round.
         _doc_scan_from = 0
+        _validation_only_round = False
+
+        if (
+            _workspace_mutation_request
+            and round_num > _effective_max_rounds
+        ):
+            # The implementation budget is spent. Do not let a tool call on
+            # the nominal final round silently expand into an unbounded run.
+            if (
+                buddy_enabled
+                and buddy_final_review
+                and not _buddy_final_review_done
+            ):
+                _buddy_final_review_done = True
+                yield f'data: {json.dumps({"type": "buddy_start", "reason": "round_budget_final", "round": round_num, "model": buddy_model, "role": buddy_role})}\n\n'
+                _buddy_advice = await _run_buddy_subagent(
+                    _verifier_instruction,
+                    _build_actions_snapshot(tool_events),
+                    "",
+                    endpoint_url=buddy_endpoint_url,
+                    model=buddy_model,
+                    headers=buddy_headers,
+                    guide_prompt=buddy_prompt,
+                    role=buddy_role,
+                    available_tools=_buddy_available_tools,
+                    consultation_reason="final review at workspace round budget",
+                )
+                _buddy_last_round = round_num
+                _buddy_decision = _buddy_verdict(_buddy_advice)
+                yield f'data: {json.dumps({"type": "buddy_result", "reason": "round_budget_final", "round": round_num, "advice": _buddy_advice, "verdict": _buddy_decision, "success": bool(_buddy_advice), "model": buddy_model, "role": buddy_role})}\n\n'
+                if _buddy_advice:
+                    messages.extend(
+                        _buddy_guidance_messages(
+                            _buddy_advice, "round-budget final review"
+                        )
+                    )
+            _force_answer = True
+            messages.append({
+                "role": "system",
+                "content": (
+                    "The workspace execution budget is exhausted. Do not call "
+                    "tools. Give an honest final status now: summarize completed "
+                    "changes and validations, and clearly identify anything "
+                    "unfinished or unverified. Never claim tests passed unless "
+                    "a recorded validation result proves it."
+                ),
+            })
+        elif (
+            _workspace_mutation_request
+            and _workspace_mutation_count > 0
+            and _validation_attempt_count == 0
+            and round_num >= _validation_gate_round
+        ):
+            _validation_only_round = True
+            if not _validation_gate_nudged:
+                _validation_gate_nudged = True
+                _validation_message = (
+                    "Validation phase is now mandatory. Stop adding features "
+                    "for this round. Run a focused automated test/build/lint "
+                    "command, or use agent_ide action=request with an explicit "
+                    "expected_status. Plain `curl -s` and process listing are "
+                    "not validations. Fix failures afterward."
+                )
+                messages.append({"role": "system", "content": _validation_message})
+                yield "data: " + json.dumps({
+                    "type": "progress_nudge",
+                    "reason": "validation_required",
+                    "round": round_num,
+                    "message": _validation_message,
+                }) + "\n\n"
+        elif (
+            _workspace_mutation_request
+            and not _finalization_nudged
+            and round_num >= _finalization_nudge_round
+        ):
+            _finalization_nudged = True
+            messages.append({
+                "role": "system",
+                "content": (
+                    "You are in the final delivery phase. Do not expand scope. "
+                    "Resolve known failures, run final status-aware validation, "
+                    "then give a concise honest completion report."
+                ),
+            })
 
         # Long agent runs periodically get a cold read from a separate,
         # tool-free context. The interval is deliberately jittered so the
@@ -3940,7 +4284,7 @@ async def stream_agent_loop(
             buddy_enabled
             and _buddy_next_round is not None
             and round_num >= _buddy_next_round
-            and round_num <= max_rounds
+            and round_num <= _effective_max_rounds
         ):
             yield f'data: {json.dumps({"type": "buddy_start", "reason": "cadence", "round": round_num, "model": buddy_model, "role": buddy_role})}\n\n'
             _buddy_advice = await _run_buddy_subagent(
@@ -3961,8 +4305,9 @@ async def stream_agent_loop(
                 if _buddy_interval
                 else None
             )
-            yield f'data: {json.dumps({"type": "buddy_result", "reason": "cadence", "round": round_num, "advice": _buddy_advice, "success": bool(_buddy_advice), "model": buddy_model, "role": buddy_role})}\n\n'
-            if _buddy_advice:
+            _buddy_decision = _buddy_verdict(_buddy_advice)
+            yield f'data: {json.dumps({"type": "buddy_result", "reason": "cadence", "round": round_num, "advice": _buddy_advice, "verdict": _buddy_decision, "success": bool(_buddy_advice), "model": buddy_model, "role": buddy_role})}\n\n'
+            if _buddy_advice and _buddy_decision != "ACCEPT":
                 messages.extend(
                     _buddy_guidance_messages(_buddy_advice, "periodic check-in")
                 )
@@ -4021,6 +4366,15 @@ async def stream_agent_loop(
                     allowed_names=_ornith_allowed_names,
                     active_document=_prompt_active_document,
                 )
+            if _validation_only_round:
+                _validation_names = {
+                    "bash", "agent_ide", "read_file", "grep", "glob", "ls",
+                }
+                all_tool_schemas = [
+                    schema for schema in all_tool_schemas
+                    if schema.get("function", {}).get("name")
+                    in _validation_names
+                ]
         else:
             # Local: only MCP schemas when message suggests MCP tool usage
             _last_content = _last_user.lower()
@@ -4052,12 +4406,14 @@ async def stream_agent_loop(
         _round_start = time.time()
         _round_first_event_logged = False
         _round_first_token_logged = False
+        _prompt_tokens_this_round = estimate_tokens(messages)
+        _round_prompt_tokens.append(_prompt_tokens_this_round)
         logger.info(
             "[agent-timing] round_start round=%s model=%s endpoint=%s prompt_tokens=%s tools=%s native_tools=%s timeout=%s",
             round_num,
             model,
             endpoint_url,
-            estimate_tokens(messages),
+            _prompt_tokens_this_round,
             len(_tool_names_sent),
             bool(all_tool_schemas),
             agent_stream_timeout,
@@ -4459,12 +4815,12 @@ async def stream_agent_loop(
                 if _synth:
                     yield f'data: {json.dumps({"delta": _synth})}\n\n'
                     full_response += _synth
+                    round_response = _synth
                 else:
-                    _fb = ("I gathered some search results but couldn't pull a clean "
-                           "answer together. Want me to try a more specific question, "
-                           "or summarize what I did find?")
+                    _fb = _force_answer_failure
                     yield f'data: {json.dumps({"delta": _fb})}\n\n'
                     full_response += _fb
+                    round_response = _fb
 
         # ── Fallback: auto-create document if model dumped large code in chat ──
         # If no create_document tool was used, check for big code blocks in text
@@ -4541,6 +4897,7 @@ async def stream_agent_loop(
                     continue
                 _failure = _ornith_document_failure
                 full_response = _failure
+                _accepted_final_response = _failure
                 round_texts[-1] = _failure
                 yield f'data: {json.dumps({"delta": _failure})}\n\n'
                 break
@@ -4552,6 +4909,7 @@ async def stream_agent_loop(
                 buddy_enabled
                 and buddy_final_review
                 and not _buddy_final_review_done
+                and not _force_answer
             ):
                 _buddy_final_review_done = True
                 if _buddy_last_round != round_num:
@@ -4568,8 +4926,9 @@ async def stream_agent_loop(
                         available_tools=_buddy_available_tools,
                         consultation_reason="final-path review",
                     )
-                    yield f'data: {json.dumps({"type": "buddy_result", "reason": "final", "round": round_num, "advice": _buddy_advice, "success": bool(_buddy_advice), "model": buddy_model, "role": buddy_role})}\n\n'
-                    if _buddy_advice:
+                    _buddy_decision = _buddy_verdict(_buddy_advice)
+                    yield f'data: {json.dumps({"type": "buddy_result", "reason": "final", "round": round_num, "advice": _buddy_advice, "verdict": _buddy_decision, "success": bool(_buddy_advice), "model": buddy_model, "role": buddy_role})}\n\n'
+                    if _buddy_advice and _buddy_decision != "ACCEPT":
                         # Preserve the candidate answer as context for revision,
                         # but accept only the post-buddy answer as the saved
                         # response for this turn.
@@ -4645,6 +5004,7 @@ async def stream_agent_loop(
             # happen to contain "let me know" are not stalls.
             _looks_like_promise = (
                 not guide_only
+                and not _force_answer
                 and _intent_match is not None
                 and len(_intent_text) < 400
                 and "```" not in _intent_text
@@ -4702,7 +5062,19 @@ async def stream_agent_loop(
                     })
                     + "\n\n"
                 )
+                _accepted_final_response = _guard_message
+                if round_texts:
+                    round_texts[-1] = _guard_message
                 break
+            _candidate_final = _strip_think_blocks(
+                strip_tool_blocks(round_response, skip_fenced=False)
+            ).strip()
+            if _force_answer and not _candidate_final:
+                _candidate_final = _force_answer_failure
+                yield f'data: {json.dumps({"delta": _candidate_final})}\n\n'
+            _accepted_final_response = _candidate_final
+            if round_texts:
+                round_texts[-1] = _candidate_final
             break  # no tools — done
 
         # ── Loop-breaker (Terminus-style stall detector) ──────────────
@@ -4762,7 +5134,7 @@ async def stream_agent_loop(
                 _call_freq, candidates=_current_call_sigs
             )
         )
-        if _stuck_rounds >= 4 or _runaway:
+        if _stuck_rounds >= 3 or _runaway:
             reason = (f"calling {_runaway} with identical arguments over and over" if _runaway
                       else "repeating the same tool calls without new progress")
             logger.warning(f"[agent] loop-breaker tripped on round {round_num} ({reason}); sig={_sig[:80]!r}")
@@ -5252,8 +5624,19 @@ async def stream_agent_loop(
                 _ornith_document_result = dict(result)
             if block.tool_type in _VERIFIER_EFFECTFUL_TOOLS:
                 _effectful_used = True
+            if not tool_succeeded:
+                _failed_tool_count += 1
+            if result.get("safety_block") == "persistent_data":
+                _destructive_block_count += 1
             if tool_succeeded and block.tool_type in _WORKSPACE_MUTATING_TOOLS:
                 _round_mutation_succeeded = True
+                _workspace_mutation_count += 1
+                if not _first_mutation_round:
+                    _first_mutation_round = round_num
+            if _is_validation_call(block.tool_type, block.content, result):
+                _validation_attempt_count += 1
+                if tool_succeeded:
+                    _validation_call_count += 1
 
             formatted = format_tool_result(desc, result)
             tool_results.append(formatted)
@@ -5290,6 +5673,7 @@ async def stream_agent_loop(
                 _ornith_document_result
             )
             full_response = _confirmation
+            _accepted_final_response = _confirmation
             if round_texts:
                 round_texts[-1] = _confirmation
             yield f'data: {json.dumps({"delta": _confirmation})}\n\n'
@@ -5305,6 +5689,7 @@ async def stream_agent_loop(
             if not full_response.strip():
                 full_response = "Done."
                 yield 'data: ' + json.dumps({"delta": "Done."}) + '\n\n'
+            _accepted_final_response = full_response.strip()
             logger.info("[agent] odysseus doc stream-create completed after one create_document")
             break
 
@@ -5312,6 +5697,7 @@ async def stream_agent_loop(
             if not full_response.strip() or full_response.strip().startswith("```"):
                 full_response = "Done."
                 yield 'data: ' + json.dumps({"delta": "Done."}) + '\n\n'
+            _accepted_final_response = full_response.strip()
             logger.info("[agent] odysseus doc tool completed after one textual tool block")
             break
 
@@ -5334,7 +5720,7 @@ async def stream_agent_loop(
                 _rounds_without_workspace_mutation = 0
             else:
                 _rounds_without_workspace_mutation += 1
-            if _rounds_without_workspace_mutation >= 4:
+            if _rounds_without_workspace_mutation >= 3:
                 _rounds_without_workspace_mutation = 0
                 _progress_message = (
                     "You have spent several rounds inspecting an implementation "
@@ -5386,8 +5772,9 @@ async def stream_agent_loop(
                         if _buddy_interval
                         else None
                     )
-                    yield f'data: {json.dumps({"type": "buddy_result", "reason": "stall", "round": round_num, "advice": _buddy_advice, "success": bool(_buddy_advice), "model": buddy_model, "role": buddy_role})}\n\n'
-                    if _buddy_advice:
+                    _buddy_decision = _buddy_verdict(_buddy_advice)
+                    yield f'data: {json.dumps({"type": "buddy_result", "reason": "stall", "round": round_num, "advice": _buddy_advice, "verdict": _buddy_decision, "success": bool(_buddy_advice), "model": buddy_model, "role": buddy_role})}\n\n'
+                    if _buddy_advice and _buddy_decision != "ACCEPT":
                         messages.extend(
                             _buddy_guidance_messages(
                                 _buddy_advice, "progress-stall check"
@@ -5420,9 +5807,18 @@ async def stream_agent_loop(
         _failure = _ornith_document_failure
         if _failure not in full_response:
             full_response = _failure
+            _accepted_final_response = _failure
             if round_texts:
                 round_texts[-1] = _failure
             yield f'data: {json.dumps({"delta": _failure})}\n\n'
+
+    # Only the accepted terminal answer belongs in history. Earlier rounds are
+    # useful live progress, but concatenating them produced saved transcripts
+    # full of plans, Buddy drafts, and raw pseudo-tool syntax.
+    if _accepted_final_response:
+        full_response = _accepted_final_response
+    elif _force_answer:
+        full_response = _force_answer_failure
 
     # If the response is completely empty and no tools were executed,
     # yield a fallback message so the user is not left hanging.
@@ -5435,7 +5831,9 @@ async def stream_agent_loop(
     # Do not persist raw textual tool-call JSON / role markers as assistant
     # prose. Local finetunes may emit those before the parser catches and
     # executes them; saved history should contain only the user-facing answer.
-    full_response = strip_tool_blocks(full_response).strip()
+    full_response = _strip_think_blocks(
+        strip_tool_blocks(full_response, skip_fenced=False)
+    ).strip()
     if _ody_notes_finetune_mode and tool_events:
         for _ev in reversed(tool_events):
             if _ev.get("tool") != "manage_notes":
@@ -5465,6 +5863,19 @@ async def stream_agent_loop(
         backend_prefill_tps=backend_prefill_tps,
     )
     metrics["requested_model"] = requested_model
+    metrics["agent_rounds"] = len(round_texts)
+    metrics["tool_calls"] = len(tool_events)
+    metrics["workspace_mutations"] = _workspace_mutation_count
+    metrics["validation_calls"] = _validation_call_count
+    metrics["validation_attempts"] = _validation_attempt_count
+    metrics["failed_tool_calls"] = _failed_tool_count
+    metrics["destructive_blocks"] = _destructive_block_count
+    metrics["first_mutation_round"] = _first_mutation_round or None
+    metrics["workspace_round_cap"] = (
+        _effective_max_rounds if _workspace_mutation_request else None
+    )
+    metrics["round_prompt_tokens"] = _round_prompt_tokens
+    yield f"data: {json.dumps({'type': 'final_response', 'content': full_response})}\n\n"
     yield f"data: {json.dumps({'type': 'metrics', 'data': metrics})}\n\n"
 
     # Teacher-escalation: inline takeover visible in the chat stream.

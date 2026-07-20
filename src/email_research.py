@@ -1117,6 +1117,14 @@ class EmailResearchWorker:
         force: bool = False,
         automation_id: Optional[str] = None,
     ) -> dict:
+        # Automated mailbox/research work is background work too. The task
+        # scheduler already yields to active chats, but this independent worker
+        # previously kept polling and advancing jobs while a foreground model
+        # was generating, causing avoidable network timeouts and GPU/CPU
+        # contention. Explicit "run now" requests remain immediate.
+        if not force:
+            from src.interactive_gate import wait_for_interactive_quiet
+            await wait_for_interactive_quiet("email research cycle")
         async with self._cycle_lock:
             started = time.monotonic()
             self.status["running"] = True
@@ -1163,6 +1171,11 @@ class EmailResearchWorker:
                         ).append(instance)
 
                 for account_id, account_instances in by_account.items():
+                    if not force:
+                        from src.interactive_gate import wait_for_interactive_quiet
+                        await wait_for_interactive_quiet(
+                            "email research mailbox poll"
+                        )
                     outcome = await self._poll_account(
                         account_id, account_instances
                     )
@@ -1171,6 +1184,11 @@ class EmailResearchWorker:
                     ignored += outcome["ignored_or_duplicate"]
 
                 for instance in instances:
+                    if not force:
+                        from src.interactive_gate import wait_for_interactive_quiet
+                        await wait_for_interactive_quiet(
+                            "email research job advance"
+                        )
                     progressed += await self._advance_due(
                         instance.config, instance.id
                     )

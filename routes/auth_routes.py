@@ -654,6 +654,7 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
         # sane range so a bad value can't disable the agent or let it run away.
         _INT_RANGES = {
             "agent_max_rounds": (1, 1000),
+            "agent_workspace_max_rounds": (12, 200),
             "agent_max_tool_calls": (0, 1000),  # 0 = unlimited
         }
         for key in DEFAULT_SETTINGS:

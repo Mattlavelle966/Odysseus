@@ -18,6 +18,7 @@ import src.agent_tools.subprocess_tools as subprocess_tools
 from src.agent_tools.subprocess_tools import (
     BashTool,
     _has_unmanaged_background_operator,
+    _looks_like_foreground_server,
 )
 
 
@@ -50,6 +51,41 @@ async def test_bash_rejects_unmanaged_background_without_starting_process(
 
     assert result["exit_code"] == 2
     assert "#!bg" in result["error"]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "node app.js",
+        "cd /workspace/site && npm start",
+        "npm run dev",
+        "uvicorn app:app --port 4100",
+        "python3 -m http.server 4100",
+    ],
+)
+def test_foreground_development_servers_are_detected(command):
+    assert _looks_like_foreground_server(command)
+
+
+@pytest.mark.asyncio
+async def test_bash_rejects_foreground_dev_server_without_starting_process(
+    monkeypatch,
+):
+    async def fail_if_started(*args, **kwargs):
+        raise AssertionError("subprocess must not start")
+
+    monkeypatch.setattr(
+        subprocess_tools.asyncio,
+        "create_subprocess_shell",
+        fail_if_started,
+    )
+    result = await BashTool().execute(
+        "cd /workspace/site && node app.js 2>&1",
+        {"subproc_env": {}},
+    )
+    assert result["exit_code"] == 2
+    assert result["managed_process_required"] is True
+    assert "agent_ide" in result["error"]
 
 
 @pytest.fixture

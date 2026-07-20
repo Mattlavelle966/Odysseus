@@ -3,6 +3,12 @@
 from __future__ import annotations
 
 import json
+from urllib.parse import urlencode
+
+import httpx
+
+
+_TEST_COOKIE_JARS: dict[tuple[str, int], httpx.Cookies] = {}
 
 
 class AgentIDETool:
@@ -74,7 +80,10 @@ class AgentIDETool:
                     result["agent_ide_id"] = payload["id"]
                 return result
 
-            if action in {"connect", "serve_static", "start_static"}:
+            if action in {
+                "connect", "serve_static", "start_static",
+                "start", "restart",
+            }:
                 workspace = str(
                     args.get("workspace_path")
                     or args.get("workspace")
@@ -96,6 +105,31 @@ class AgentIDETool:
                     payload = agent_ide.connect_session(
                         **common,
                         port=args.get("port"),
+                    )
+                elif action in {"start", "restart"}:
+                    previous = (
+                        agent_ide.get_session(owner, agent_ide_id)
+                        if agent_ide_id
+                        else None
+                    )
+                    command = str(
+                        args.get("command")
+                        or (previous.managed_command if previous else "")
+                        or ""
+                    ).strip()
+                    port = args.get("port") or (
+                        previous.port if previous is not None else None
+                    )
+                    if port is None:
+                        raise ValueError(f"{action} requires a port")
+                    if not command or command == "__static__":
+                        raise ValueError(
+                            f"{action} requires a development server command"
+                        )
+                    payload = agent_ide.start_managed_session(
+                        **common,
+                        command=command,
+                        port=port,
                     )
                 else:
                     payload = agent_ide.start_static_session(
@@ -119,6 +153,106 @@ class AgentIDETool:
                     "exit_code": 0,
                 }
 
+            if action in {"request", "http_request", "test"}:
+                if not agent_ide_id:
+                    sessions = agent_ide.list_sessions(owner)
+                    if not sessions:
+                        raise ValueError("No AgentIDE project exists to test")
+                    agent_ide_id = sessions[0]["id"]
+                record = agent_ide.get_session(owner, agent_ide_id)
+                if record is None:
+                    raise ValueError("AgentIDE project was not found")
+                port = agent_ide.validate_port(args.get("port") or record.port)
+                if not agent_ide.is_service_port_allowed(record, port):
+                    raise ValueError(
+                        f"Port {port} is not registered for this AgentIDE project"
+                    )
+                method = str(args.get("method") or "GET").strip().upper()
+                if method not in {
+                    "GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS",
+                }:
+                    raise ValueError("Unsupported HTTP method")
+                path = agent_ide.normalize_entry_path(args.get("path") or "/")
+                query = args.get("query")
+                if isinstance(query, dict) and query:
+                    path += ("&" if "?" in path else "?") + urlencode(
+                        {str(k): str(v) for k, v in query.items()}
+                    )
+                headers = args.get("headers") if isinstance(args.get("headers"), dict) else {}
+                safe_headers = {
+                    str(key): str(value)
+                    for key, value in headers.items()
+                    if str(key).lower() not in {
+                        "host", "connection", "content-length",
+                        "proxy-authorization",
+                    }
+                }
+                jar_key = (record.id, port)
+                cookies = _TEST_COOKIE_JARS.setdefault(jar_key, httpx.Cookies())
+                request_kwargs = {
+                    "headers": safe_headers,
+                    "cookies": cookies,
+                }
+                if "json" in args:
+                    request_kwargs["json"] = args.get("json")
+                elif "body" in args:
+                    request_kwargs["content"] = str(args.get("body") or "")
+                try:
+                    async with httpx.AsyncClient(
+                        timeout=httpx.Timeout(15.0),
+                        follow_redirects=bool(args.get("follow_redirects", False)),
+                    ) as client:
+                        response = await client.request(
+                            method,
+                            f"http://127.0.0.1:{port}{path}",
+                            **request_kwargs,
+                        )
+                        cookies.update(response.cookies)
+                except httpx.HTTPError as exc:
+                    return {
+                        "error": f"AgentIDE HTTP request failed: {exc}",
+                        "result": "failed",
+                        "exit_code": 1,
+                    }
+                expected = args.get("expected_status")
+                if expected is None:
+                    expected_statuses = set(range(200, 400))
+                elif isinstance(expected, list):
+                    expected_statuses = {
+                        int(item) for item in expected
+                        if isinstance(item, (int, str)) and str(item).isdigit()
+                    }
+                else:
+                    expected_statuses = {int(expected)}
+                body = response.text
+                if len(body) > 12000:
+                    body = (
+                        body[:6000]
+                        + f"\n...[truncated, {len(response.text)} chars total]...\n"
+                        + body[-6000:]
+                    )
+                success = response.status_code in expected_statuses
+                payload = {
+                    "result": "success" if success else "failed",
+                    "action": "request",
+                    "method": method,
+                    "path": path,
+                    "port": port,
+                    "status_code": response.status_code,
+                    "content_type": response.headers.get("content-type", ""),
+                    "response_body": body,
+                    "output": (
+                        f"{method} {path} -> HTTP {response.status_code}\n{body}"
+                    ).rstrip(),
+                    "exit_code": 0 if success else 1,
+                }
+                if not success:
+                    payload["error"] = (
+                        f"Expected HTTP {sorted(expected_statuses)}, "
+                        f"received {response.status_code}"
+                    )
+                return payload
+
             if action in {"stop", "disconnect", "delete"}:
                 if not agent_ide_id:
                     raise ValueError(f"{action} requires agent_ide_id")
@@ -127,6 +261,11 @@ class AgentIDETool:
                     agent_ide_id,
                     delete=action == "delete",
                 )
+                for key in [
+                    key for key in _TEST_COOKIE_JARS
+                    if key[0] == agent_ide_id
+                ]:
+                    _TEST_COOKIE_JARS.pop(key, None)
                 return {
                     **payload,
                     "result": "success",
@@ -136,8 +275,8 @@ class AgentIDETool:
                 }
 
             raise ValueError(
-                "Unknown action. Use list, connect, serve_static, open, status, "
-                "refresh, stop, disconnect, or delete."
+                "Unknown action. Use list, connect, start, restart, request, "
+                "serve_static, open, status, refresh, stop, disconnect, or delete."
             )
         except ValueError as exc:
             return {

@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Optional, Set
 
 logger = logging.getLogger(__name__)
+
+_ADMIN_DECISION_TTL_S = 0.25
+_ADMIN_DECISION_CACHE: dict[tuple[object, Optional[str]], tuple[float, bool]] = {}
 
 
 # Every tool exposed by the built-in email MCP server
@@ -231,7 +235,10 @@ def is_public_blocked_tool(tool_name: Optional[str]) -> bool:
     return tool_name in NON_ADMIN_BLOCKED_TOOLS or tool_name.startswith("mcp__")
 
 
-def owner_is_admin_or_single_user(owner: Optional[str]) -> bool:
+def owner_is_admin_or_single_user(
+    owner: Optional[str],
+    auth_manager=None,
+) -> bool:
     """Return True for admins, or in intentional single-user mode.
 
     Single-user mode means the operator explicitly disabled auth
@@ -250,12 +257,24 @@ def owner_is_admin_or_single_user(owner: Optional[str]) -> bool:
         if _auth_disabled():
             return True
 
-        from core.auth import AuthManager
-
-        auth = AuthManager()
+        if auth_manager is None:
+            from core.auth import AuthManager
+            key = (AuthManager, owner)
+            now = time.monotonic()
+            cached = _ADMIN_DECISION_CACHE.get(key)
+            if cached and now - cached[0] <= _ADMIN_DECISION_TTL_S:
+                return cached[1]
+            auth_manager = AuthManager()
+        else:
+            key = None
+        auth = auth_manager
         if not auth.is_configured:
-            return False
-        return bool(owner and auth.is_admin(owner))
+            decision = False
+        else:
+            decision = bool(owner and auth.is_admin(owner))
+        if key is not None:
+            _ADMIN_DECISION_CACHE[key] = (time.monotonic(), decision)
+        return decision
     except Exception as exc:
         logger.warning("Unable to evaluate owner admin status: %s", exc)
         return False

@@ -11,7 +11,7 @@ import uiModule from './ui.js';
 const API = '/api/agentide';
 const STORAGE_ID = 'odysseus-agentide-current';
 const STORAGE_WIDTH = 'odysseus-agentide-width';
-const POLL_MS = 1500;
+const POLL_MS = 3000;
 
 let panel = null;
 let divider = null;

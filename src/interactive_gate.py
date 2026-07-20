@@ -64,7 +64,10 @@ _PASSIVE_EXACT_PATHS = {
     "/api/client-perf",
     "/api/tasks/notifications",
     "/api/research/active",
+    "/api/notes",
+    "/api/calendar/events",
     "/api/email/urgency-state",
+    "/api/email/unread-state",
 }
 
 _PASSIVE_PREFIXES = (
@@ -77,9 +80,17 @@ _PASSIVE_PREFIXES = (
 def should_track_interactive_request(path: str, method: str = "GET") -> bool:
     if not _enabled():
         return False
-    if (method or "").upper() == "OPTIONS":
+    method = (method or "").upper()
+    if method == "OPTIONS":
         return False
-    if path in _PASSIVE_EXACT_PATHS:
+    if path in {"/api/activity/heartbeat", "/api/client-perf"}:
+        return False
+    if method in {"GET", "HEAD"} and path in _PASSIVE_EXACT_PATHS:
+        return False
+    # AgentIDE polls session reachability while its panel is open. A read-only
+    # status poll is not foreground work and must not repeatedly cancel or
+    # postpone scheduled jobs; connect/update/delete requests remain tracked.
+    if method in {"GET", "HEAD"} and path.startswith("/api/agentide/sessions"):
         return False
     if any(path.startswith(prefix) for prefix in _PASSIVE_PREFIXES):
         return False
