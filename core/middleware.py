@@ -2,6 +2,7 @@
 # Shared middleware, decorators, and request helpers
 
 import os
+import re
 import secrets
 
 from fastapi import HTTPException, Request
@@ -26,6 +27,27 @@ def is_cors_preflight(method: str, headers) -> bool:
     401s the preflight and breaks every cross-origin browser/WebView client.
     Pure so it can be unit-tested without standing up the app."""
     return method == "OPTIONS" and "access-control-request-method" in headers
+
+
+_AGENTIDE_PREVIEW_TOKEN_PATH_RE = re.compile(
+    r"^/api/agentide/[^/]+/preview-token/[0-9a-f]{64}(?:/|$)"
+)
+
+
+def is_agentide_preview_preflight(method: str, path: str, headers) -> bool:
+    """Identify the sandboxed AgentIDE capability-preview preflight.
+
+    AgentIDE intentionally omits ``allow-same-origin`` from its iframe sandbox,
+    so browsers serialize its origin as ``null``. The global CORS middleware
+    must not trust every null-origin page, but this narrowly scoped capability
+    URL can safely receive a preflight response: the real request still has to
+    pass the 64-character preview-token validation in the route.
+    """
+    return bool(
+        is_cors_preflight(method, headers)
+        and headers.get("origin") == "null"
+        and _AGENTIDE_PREVIEW_TOKEN_PATH_RE.match(path or "")
+    )
 
 
 def require_admin(request: Request):

@@ -74,6 +74,17 @@ def test_polish_internet_search_request_classifies_as_web():
     assert "web" in intent["domains"]
 
 
+def test_fix_app_request_classifies_as_file_development():
+    intent = _classify_agent_request(
+        [],
+        "please help me fix this app, it keeps saying failed to fetch when i signup.",
+    )
+
+    assert intent["low_signal"] is False
+    assert "files" in intent["domains"]
+    assert "web" not in intent["domains"]
+
+
 def test_insert_before_latest_user_places_context_before_last_user_turn():
     messages = [
         {"role": "user", "content": "first"},

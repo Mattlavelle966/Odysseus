@@ -55,7 +55,7 @@ from typing import Dict
 
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import JSONResponse, FileResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -67,7 +67,11 @@ from core.constants import (
     REQUEST_TIMEOUT, OPENAI_API_KEY, AUTH_FILE,
 )
 from core.database import SessionLocal, ApiToken
-from core.middleware import SecurityHeadersMiddleware, is_cors_preflight
+from core.middleware import (
+    SecurityHeadersMiddleware,
+    is_agentide_preview_preflight,
+    is_cors_preflight,
+)
 from core.auth import AuthManager, normalize_known_username
 from core.exceptions import (
     SessionNotFoundError, InvalidFileUploadError,
@@ -363,6 +367,47 @@ if AUTH_ENABLED:
     class AuthMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request: Request, call_next):
             path = request.url.path
+            if is_agentide_preview_preflight(
+                request.method,
+                path,
+                request.headers,
+            ):
+                # The sandboxed iframe has the opaque browser origin "null".
+                # CORSMiddleware rejects that origin globally before the
+                # AgentIDE token route can answer its own OPTIONS request.
+                # Handle only capability-preview preflights here; the actual
+                # request still validates the preview token in _proxy().
+                requested_headers = request.headers.get(
+                    "access-control-request-headers",
+                    "",
+                )
+                allowed_names = {
+                    "accept",
+                    "accept-language",
+                    "content-language",
+                    "content-type",
+                    "x-requested-with",
+                    "x-tz-offset",
+                }
+                allowed_headers = ", ".join(
+                    item.strip()
+                    for item in requested_headers.split(",")
+                    if item.strip().lower() in allowed_names
+                )
+                return Response(
+                    status_code=204,
+                    headers={
+                        "access-control-allow-origin": "null",
+                        "access-control-allow-methods": (
+                            "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS"
+                        ),
+                        "access-control-allow-headers": (
+                            allowed_headers or "Content-Type"
+                        ),
+                        "access-control-max-age": "600",
+                        "vary": "Origin",
+                    },
+                )
             # A genuine CORS preflight (OPTIONS + Access-Control-Request-Method)
             # carries no credentials by design and must reach CORSMiddleware to be
             # answered. AuthMiddleware is the outermost middleware, so gating the

@@ -231,7 +231,7 @@ async def test_binding_does_not_leak(ws, admin):
 # must still surface the file tools, otherwise the agent says it has no file
 # access (the bug this guards against).
 
-def _sent_tool_names(monkeypatch, *, workspace):
+def _sent_tool_names(monkeypatch, *, workspace, prompt="look at the local project"):
     import asyncio
     import src.agent_loop as al
 
@@ -253,7 +253,7 @@ def _sent_tool_names(monkeypatch, *, workspace):
     async def _run():
         gen = al.stream_agent_loop(
             "https://api.openai.com/v1", "gpt-test",
-            [{"role": "user", "content": "look at the local project"}],
+            [{"role": "user", "content": prompt}],
             max_rounds=1, relevant_tools=None, owner="admin", workspace=workspace,
         )
         return [c async for c in gen]
@@ -280,6 +280,15 @@ def test_low_signal_without_workspace_excludes_file_tools(monkeypatch):
     names = _sent_tool_names(monkeypatch, workspace=None)
     assert "read_file" not in names
     assert "get_workspace" not in names
+
+
+def test_fix_app_with_workspace_surfaces_development_tools(monkeypatch):
+    names = _sent_tool_names(
+        monkeypatch,
+        workspace="/tmp",
+        prompt="please help me fix this app, it keeps saying failed to fetch when i signup.",
+    )
+    assert {"bash", "read_file", "write_file", "edit_file", "agent_ide"} <= names
 
 
 # ── browse route is admin-gated ─────────────────────────────────────────

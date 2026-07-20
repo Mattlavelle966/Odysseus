@@ -1057,7 +1057,8 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
     if has(
         r"\b(run|execute|test|debug|fix|save|create|edit|read|open)\b.{0,40}\b("
         r"python|javascript|typescript|java|c\+\+|cpp|c#|csharp|rust|go|golang|"
-        r"ruby|php|swift|kotlin|bash|shell|html|css|sql|code|script|program|game"
+        r"ruby|php|swift|kotlin|bash|shell|html|css|sql|code|script|program|game|"
+        r"app(?:lication)?|web\s*site|site|front[ -]?end|back[ -]?end|api|endpoint|project"
         r")\b",
         r"\b("
         r"python|javascript|typescript|java|c\+\+|cpp|c#|csharp|rust|go|golang|"
@@ -2740,7 +2741,7 @@ def build_active_plan_note(approved_plan: str) -> str:
     )
 
 
-def _detect_runaway_call(call_freq, threshold=15):
+def _detect_runaway_call(call_freq, threshold=8):
     """Tool name of a call signature repeated >= ``threshold`` times — a real
     runaway loop. Counts IDENTICAL repeated calls (same tool AND args), so a
     legitimate batch of distinct calls to one tool (e.g. creating 18 calendar
@@ -2844,7 +2845,17 @@ async def stream_agent_loop(
         _project_domains = set(_intent.get("domains") or set())
         _project_domains.add("files")
         _project_domains.discard("documents")
+        if not re.search(
+            r"\b(?:search|google|look\s+up|latest|news|current|online|internet)\b|"
+            r"https?://|www\.",
+            _last_user,
+            re.IGNORECASE,
+        ):
+            # "Fix this website" describes the local workspace, not a request
+            # to search the public web just because the word "website" matched.
+            _project_domains.discard("web")
         _intent["domains"] = _project_domains
+        _intent["low_signal"] = False
     if _new_preview_document_request:
         # A standalone website/UI is a visible editor artifact, not an implicit
         # request to create an unmanaged project and bind a local port.
@@ -2852,6 +2863,7 @@ async def stream_agent_loop(
         _preview_domains.add("documents")
         _preview_domains.discard("files")
         _intent["domains"] = _preview_domains
+        _intent["low_signal"] = False
     _low_signal_turn = bool(_intent.get("low_signal"))
     _casual_low_signal_turn = _is_casual_low_signal(_last_user)
     _existing_conversation = _user_turn_count(messages) > 1
@@ -3567,7 +3579,7 @@ async def stream_agent_loop(
     # tool, so we don't nudge on harmless transitional text like "let me
     # know what you think".
     _INTENT_RE = re.compile(
-        r"(?:^|\n)\s*(?:let me|i'?ll|i will|i need to|we need to|need to|"
+        r"(?:^|[\n.!?]\s*)(?:let me|i'?ll|i will|i need to|we need to|need to|"
         r"i should|we should|i must|we must|going to|let's)\s+"
         r"(?:tail|check|investigate|look at|see|tail|read|fetch|inspect|"
         r"verify|diagnose|examine|debug|capture|grab|pull|view|run|call|"
@@ -4407,9 +4419,19 @@ async def stream_agent_loop(
         # rounds (just "<think>\n\n</think>" + a tool call) must not read as
         # progress, so strip think before checking.
         _real_text = _strip_think_blocks(cleaned_round).strip()
-        # Circling = repeating a recent call with nothing written. Any
-        # progress (a NEW distinct call, or actual answer text) resets it.
-        if _is_repeat and not _real_text:
+        # A short "let me check/start/test..." sentence attached to the same
+        # repeated call is not progress. Weak models commonly vary that promise
+        # slightly on every round, which previously reset the stall counter and
+        # let an identical web search consume the entire round budget.
+        _repeated_promise = bool(
+            _real_text
+            and len(_real_text) < 400
+            and "```" not in _real_text
+            and _INTENT_RE.search(_real_text)
+        )
+        # Circling = repeating a recent call with no substantive answer text.
+        # Genuine findings and new/distinct calls still reset the detector.
+        if _is_repeat and (not _real_text or _repeated_promise):
             _stuck_rounds += 1
         else:
             _stuck_rounds = 0

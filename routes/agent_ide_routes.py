@@ -127,11 +127,25 @@ def _preview_bootstrap(prefix: str) -> str:
     quoted = json.dumps(prefix)
     template = r"""<script>(function(){
 const p=__AGENTIDE_PREFIX__;
-const u=x=>typeof x==='string'&&x.startsWith('/')&&!x.startsWith('//')&&!x.startsWith(p)?p+x.slice(1):x;
+const page=new URL(location.href);
+const loopback=h=>h==='localhost'||h==='127.0.0.1'||h==='[::1]';
+const u=x=>{
+  if(typeof x!=='string')return x;
+  if(x.startsWith('/')&&!x.startsWith('//')&&!x.startsWith(p))return p+x.slice(1);
+  try{
+    const q=new URL(x,location.href);
+    const local=(q.protocol==='http:'||q.protocol==='https:')&&loopback(q.hostname);
+    const sameOrigin=q.origin===page.origin;
+    if((local||sameOrigin)&&q.pathname.startsWith('/')&&!q.pathname.startsWith(p)){
+      return p+q.pathname.slice(1)+q.search+q.hash;
+    }
+  }catch(_){}
+  return x;
+};
 const f=window.fetch;window.fetch=function(x,o){
   if(typeof x==='string')x=u(x);
-  else if(x instanceof Request&&x.url.startsWith(location.origin+'/')){
-    const q=new URL(x.url);x=new Request(u(q.pathname+q.search),x);
+  else if(x instanceof Request){
+    const y=u(x.url);if(y!==x.url)x=new Request(y,x);
   }
   return f.call(this,x,o);
 };

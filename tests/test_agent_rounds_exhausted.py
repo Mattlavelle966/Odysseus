@@ -41,7 +41,7 @@ def _patch_common(monkeypatch):
     monkeypatch.setattr(al, "execute_tool_block", _fake_exec, raising=False)
 
 
-def _run_loop(monkeypatch, round_text, max_rounds=2):
+def _run_loop(monkeypatch, round_text, max_rounds=2, relevant_tools=None):
     async def _fake_stream(_candidates, messages, **kwargs):
         yield f'data: {json.dumps({"delta": round_text})}\n\n'
         yield "data: [DONE]\n\n"
@@ -51,7 +51,7 @@ def _run_loop(monkeypatch, round_text, max_rounds=2):
         "http://x/v1", "m",
         [{"role": "user", "content": "do a long multi-step task"}],
         max_rounds=max_rounds,
-        relevant_tools={"bash"},
+        relevant_tools=relevant_tools or {"bash"},
     )
     return _types(_collect(gen))
 
@@ -85,6 +85,20 @@ def test_emits_loop_breaker_triggered_when_loop_breaker_trips(monkeypatch):
     _patch_common(monkeypatch)
 
     events = _run_loop(monkeypatch, "```bash\necho hi\n```", max_rounds=6)
+
+    guard = next((e for e in events if e.get("type") == "loop_breaker_triggered"), None)
+    assert guard is not None, events
+    assert guard["reason"] == "loop_breaker_stall"
+
+
+def test_short_action_promises_do_not_mask_repeated_tool_loop(monkeypatch):
+    _patch_common(monkeypatch)
+
+    events = _run_loop(
+        monkeypatch,
+        "The server is probably down. Let me check it now.\n```bash\necho hi\n```",
+        max_rounds=6,
+    )
 
     guard = next((e for e in events if e.get("type") == "loop_breaker_triggered"), None)
     assert guard is not None, events

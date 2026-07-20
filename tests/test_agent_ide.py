@@ -220,7 +220,12 @@ def test_proxy_leaves_binary_response_unchanged():
 
 
 def test_capability_preview_rewrites_runtime_fetches():
-    html = b"<html><head></head><body><script>fetch('/api/items')</script></body></html>"
+    html = (
+        b"<html><head></head><body><script>"
+        b"fetch('/api/items');"
+        b"fetch('http://localhost:4100/api/signup');"
+        b"</script></body></html>"
+    )
     rendered = _rewrite_preview_body(
         html,
         content_type="text/html; charset=utf-8",
@@ -231,6 +236,9 @@ def test_capability_preview_rewrites_runtime_fetches():
     assert f'<base href="{prefix}">' in rendered
     assert "XMLHttpRequest.prototype.open" in rendered
     assert "window.fetch=function" in rendered
+    assert "h==='localhost'||h==='127.0.0.1'||h==='[::1]'" in rendered
+    assert "(local||sameOrigin)" in rendered
+    assert "const y=u(x.url);if(y!==x.url)x=new Request(y,x)" in rendered
 
 
 def test_capability_preview_injects_request_scoped_element_picker():
