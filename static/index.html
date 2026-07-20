@@ -219,9 +219,9 @@
       }, { once: true });
     })();
   </script>
-  <link rel="stylesheet" href="/static/style.css?v=20260719buddy">
-  <link rel="modulepreload" href="/static/app.js?v=20260719buddy">
-  <link rel="modulepreload" href="/static/js/chat.js?v=20260719buddy">
+  <link rel="stylesheet" href="/static/style.css?v=20260720buddy2">
+  <link rel="modulepreload" href="/static/app.js?v=20260720buddy2">
+  <link rel="modulepreload" href="/static/js/chat.js?v=20260720buddy2">
   <link rel="modulepreload" href="/static/js/ui.js">
   <link rel="modulepreload" href="/static/js/sessions.js">
   <link rel="modulepreload" href="/static/js/markdown.js">
@@ -1186,7 +1186,7 @@
     </div>
     <form id="chat-form" autocomplete="off" action="javascript:void(0);" style="display:none;"></form>
 
-    <!-- Buddy Mode guide prompt -->
+    <!-- Buddy Mode settings -->
     <div id="buddy-modal" class="modal hidden">
       <div class="modal-content buddy-modal-content" role="dialog" aria-modal="true" aria-labelledby="buddy-modal-title">
         <div class="modal-header">
@@ -1194,10 +1194,47 @@
           <button type="button" class="close-btn" id="close-buddy-modal" aria-label="Close Buddy Mode">✖</button>
         </div>
         <div class="modal-body">
-          <p class="buddy-modal-copy">A fresh, tool-free agent checks the path every 10–20 agent rounds and once before the final answer. Give it a private coaching prompt, or use the default.</p>
+          <p class="buddy-modal-copy">A fresh agent on its own model and bounded context challenges the primary agent on schedule, when progress stalls, and before the final answer. Worker mode can draft code or tests for the primary agent to verify and apply.</p>
+          <label class="buddy-check-row" for="buddy-enabled-setting">
+            <input type="checkbox" id="buddy-enabled-setting">
+            <span>Enable Buddy Mode</span>
+          </label>
+          <div class="buddy-settings-grid">
+            <label for="buddy-role">Role
+              <select id="buddy-role">
+                <option value="adaptive">Adaptive</option>
+                <option value="coach">Coach</option>
+                <option value="worker">Worker / programmer</option>
+                <option value="researcher">Researcher</option>
+                <option value="reviewer">Reviewer</option>
+              </select>
+            </label>
+            <label for="buddy-cadence">Check-in cadence
+              <select id="buddy-cadence">
+                <option value="balanced">Balanced · 10–20 rounds</option>
+                <option value="frequent">Frequent · 5–10 rounds</option>
+                <option value="sparse">Sparse · 15–25 rounds</option>
+                <option value="final">Final review only</option>
+              </select>
+            </label>
+            <label for="buddy-endpoint">Endpoint
+              <select id="buddy-endpoint">
+                <option value="">Primary model</option>
+              </select>
+            </label>
+            <label for="buddy-model">Model
+              <select id="buddy-model">
+                <option value="">Endpoint default</option>
+              </select>
+            </label>
+          </div>
+          <label class="buddy-check-row" for="buddy-final-review">
+            <input type="checkbox" id="buddy-final-review" checked>
+            <span>Always review the final path</span>
+          </label>
           <label for="buddy-guide-prompt">Guide prompt</label>
           <textarea id="buddy-guide-prompt" rows="6" maxlength="4000" placeholder="Example: Be a skeptical senior engineer. Look for the smallest reliable path, missing tests, and assumptions that need evidence."></textarea>
-          <div class="buddy-modal-hint">Buddy gets its own clean context containing only the request, a bounded progress snapshot, and the current draft.</div>
+          <div class="buddy-modal-hint">Buddy receives the resolved task, available primary tools, a bounded progress snapshot, and the current draft—not the long chat history. If its endpoint cannot be resolved, the primary model is used safely.</div>
         </div>
         <div class="modal-footer">
           <button type="button" id="cancel-buddy-modal">Cancel</button>
@@ -2533,7 +2570,7 @@
 <script type="module" src="/static/js/chatRenderer.js?v=20260630toolmetrics"></script>
 <script type="module" src="/static/js/codeRunner.js"></script>
 <script type="module" src="/static/js/chatStream.js"></script>
-<script type="module" src="/static/js/chat.js?v=20260719buddy"></script>
+<script type="module" src="/static/js/chat.js?v=20260720buddy2"></script>
 <script type="module" src="/static/js/cookbook.js"></script>
 <script src="/static/js/cookbookSchedule.js"></script>
 <script type="module" src="/static/js/search-chat.js"></script>
@@ -2543,7 +2580,7 @@
 <script type="module" src="/static/js/settings.js"></script>
 <script type="module" src="/static/js/admin.js"></script>
 <script type="module" src="/static/js/assistant.js"></script>
-<script type="module" src="/static/app.js?v=20260719buddy"></script>  <!-- app.js must be LAST -->
+<script type="module" src="/static/app.js?v=20260720buddy2"></script>  <!-- app.js must be LAST -->
 <script type="module" src="/static/js/init.js"></script>
 <script type="module" src="/static/js/a11y.js"></script>
 <script nonce="{{CSP_NONCE}}">if('serviceWorker' in navigator){navigator.serviceWorker.register('/static/sw.js').catch(()=>{});}</script>

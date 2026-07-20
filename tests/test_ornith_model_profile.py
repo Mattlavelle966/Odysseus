@@ -159,6 +159,36 @@ def test_ornith_v2_request_updates_same_document_history():
     ) == {"edit_document"}
 
 
+def test_ornith_project_tools_are_prioritized_before_eight_tool_cap():
+    names = [
+        "web_search", "web_fetch", "ask_user", "manage_memory",
+        "ls", "glob", "grep", "read_file", "write_file", "edit_file",
+        "bash", "agent_ide",
+    ]
+    schemas = [
+        {
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": name,
+                "parameters": {"type": "object"},
+            },
+        }
+        for name in names
+    ]
+
+    adapted = ORNITH_PROFILE.adapt_tool_schemas(
+        schemas,
+        allowed_names=set(names),
+    )
+    selected = [item["function"]["name"] for item in adapted]
+
+    assert selected == [
+        "agent_ide", "bash", "read_file", "edit_file",
+        "write_file", "grep", "glob", "ls",
+    ]
+
+
 def test_endpoint_diagnostic_requires_a_real_harmless_tool_call(monkeypatch):
     captured = {}
 

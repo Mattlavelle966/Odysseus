@@ -19,7 +19,7 @@ _MOCKED = [
 for _m in _MOCKED:
     sys.modules.setdefault(_m, MagicMock())
 
-from src.agent_loop import _detect_runaway_call
+from src.agent_loop import _canonical_tool_call_signature, _detect_runaway_call
 
 
 def _freq(sigs):
@@ -59,3 +59,27 @@ def test_threshold_is_configurable():
 
 def test_empty_is_not_runaway():
     assert _detect_runaway_call(collections.Counter()) is None
+
+
+def test_signature_canonicalizes_json_key_order_without_truncating_arguments():
+    first = _canonical_tool_call_signature(
+        "read_file", '{"path":"/workspace/a/very/long/prefix/one","offset":1}'
+    )
+    reordered = _canonical_tool_call_signature(
+        "read_file", '{"offset":1,"path":"/workspace/a/very/long/prefix/one"}'
+    )
+    different = _canonical_tool_call_signature(
+        "read_file", '{"offset":1,"path":"/workspace/a/very/long/prefix/two"}'
+    )
+
+    assert first == reordered
+    assert first != different
+
+
+def test_runaway_can_be_scoped_to_current_batch_candidates():
+    old = "ls:{}"
+    fresh = 'read_file:{"path":"new.py"}'
+    frequencies = _freq([old] * 8 + [fresh])
+
+    assert _detect_runaway_call(frequencies) == "ls"
+    assert _detect_runaway_call(frequencies, candidates=[fresh]) is None

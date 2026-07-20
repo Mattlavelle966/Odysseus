@@ -13,6 +13,7 @@ thread to read the counter before any writes it back.
 """
 import threading
 import time
+import asyncio
 
 from src import llm_core
 
@@ -77,3 +78,69 @@ def test_host_fail_counter_has_no_lost_updates():
     finally:
         llm_core._host_fails = original_fails
         llm_core._HOST_FAIL_THRESHOLD = original_threshold
+
+
+def test_local_model_gate_allows_distinct_gpu_endpoints_concurrently(monkeypatch):
+    monkeypatch.setattr(llm_core, "is_local_endpoint", lambda _url: True)
+    llm_core._LOCAL_MODEL_LOCKS.clear()
+    llm_core._LOCAL_MODEL_WAITING_FOREGROUND.clear()
+    llm_core._LOCAL_MODEL_CURRENT.clear()
+
+    async def scenario():
+        both_entered = asyncio.Event()
+        release = asyncio.Event()
+        entered = set()
+
+        async def worker(url):
+            async with llm_core._local_model_slot(url, "ornith", "foreground"):
+                entered.add(url)
+                if len(entered) == 2:
+                    both_entered.set()
+                await release.wait()
+
+        tasks = [
+            asyncio.create_task(worker("http://host:8080/v1/chat/completions")),
+            asyncio.create_task(worker("http://host:8083/v1/chat/completions")),
+        ]
+        await asyncio.wait_for(both_entered.wait(), timeout=0.5)
+        assert len(entered) == 2
+        release.set()
+        await asyncio.gather(*tasks)
+
+    asyncio.run(scenario())
+
+
+def test_local_model_gate_serializes_paths_on_same_endpoint(monkeypatch):
+    monkeypatch.setattr(llm_core, "is_local_endpoint", lambda _url: True)
+    llm_core._LOCAL_MODEL_LOCKS.clear()
+    llm_core._LOCAL_MODEL_WAITING_FOREGROUND.clear()
+    llm_core._LOCAL_MODEL_CURRENT.clear()
+
+    async def scenario():
+        first_entered = asyncio.Event()
+        release_first = asyncio.Event()
+        second_entered = asyncio.Event()
+
+        async def first():
+            async with llm_core._local_model_slot(
+                "http://host:8080/v1/chat/completions", "ornith-35b"
+            ):
+                first_entered.set()
+                await release_first.wait()
+
+        async def second():
+            await first_entered.wait()
+            async with llm_core._local_model_slot(
+                "http://host:8080/v1/completions", "ornith-35b"
+            ):
+                second_entered.set()
+
+        tasks = [asyncio.create_task(first()), asyncio.create_task(second())]
+        await first_entered.wait()
+        await asyncio.sleep(0)
+        assert not second_entered.is_set()
+        release_first.set()
+        await asyncio.wait_for(second_entered.wait(), timeout=0.5)
+        await asyncio.gather(*tasks)
+
+    asyncio.run(scenario())

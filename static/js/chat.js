@@ -1219,6 +1219,11 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
         if (buddyChk && buddyChk.checked) {
           fd.append('buddy_enabled', 'true');
           fd.append('buddy_prompt', String(toggleState.buddy_prompt || '').slice(0, 4000));
+          fd.append('buddy_endpoint_id', String(toggleState.buddy_endpoint_id || ''));
+          fd.append('buddy_model', String(toggleState.buddy_model || ''));
+          fd.append('buddy_role', String(toggleState.buddy_role || 'adaptive'));
+          fd.append('buddy_cadence', String(toggleState.buddy_cadence || 'balanced'));
+          fd.append('buddy_final_review', toggleState.buddy_final_review === false ? 'false' : 'true');
         }
       }
       if (el('research-toggle').checked) {
@@ -2812,9 +2817,10 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                 note.className = 'buddy-consult-note';
                 note.dataset.buddyRound = String(json.round || '');
                 note.dataset.buddyReason = json.reason || '';
-                note.textContent = json.reason === 'final'
+                const buddyLabel = [json.role, json.model].filter(Boolean).join(' · ');
+                note.textContent = (json.reason === 'final'
                   ? 'Buddy is reviewing the final path…'
-                  : 'Buddy is checking the path…';
+                  : 'Buddy is checking the path…') + (buddyLabel ? ` (${buddyLabel})` : '');
                 if (chatBox) chatBox.appendChild(note);
                 uiModule.scrollHistory();
 
@@ -2827,7 +2833,10 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                   if (json.success && json.advice) {
                     const details = document.createElement('details');
                     const summary = document.createElement('summary');
-                    summary.textContent = 'Buddy suggested a path';
+                    const buddyLabel = [json.role, json.model].filter(Boolean).join(' · ');
+                    summary.textContent = buddyLabel
+                      ? `Buddy suggested a path · ${buddyLabel}`
+                      : 'Buddy suggested a path';
                     const advice = document.createElement('div');
                     advice.className = 'buddy-consult-advice';
                     advice.textContent = json.advice;
@@ -2839,6 +2848,15 @@ import { wireArrowUpRecall, getLastUserMessageFromChatHistory } from './composer
                     note.classList.add('buddy-consult-failed');
                   }
                 }
+
+              } else if (json.type === 'progress_nudge') {
+                if (_isBg) continue;
+                const chatBox = document.getElementById('chat-history');
+                const note = document.createElement('div');
+                note.className = 'buddy-consult-note';
+                note.textContent = 'Progress supervisor redirected the agent from repeated inspection toward an edit, validation, or explicit blocker.';
+                if (chatBox) chatBox.appendChild(note);
+                uiModule.scrollHistory();
 
               } else if (json.type === 'agent_step') {
                 if (_isBg) continue;

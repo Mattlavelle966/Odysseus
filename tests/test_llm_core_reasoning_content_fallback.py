@@ -69,6 +69,58 @@ def test_llm_call_async_returns_reasoning_content_when_content_empty(monkeypatch
     assert result == "async reasoning text"
 
 
+def test_llm_call_async_forwards_template_kwargs_and_keys_cache_by_them(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(llm_core, "is_local_endpoint", lambda _url: True)
+
+    class _FakeAsyncClient:
+        async def post(self, *args, **kwargs):
+            captured.update(kwargs.get("json") or {})
+            req = httpx.Request("POST", "http://template.test/v1/chat/completions")
+            return httpx.Response(
+                200,
+                request=req,
+                json=_openai_msg("direct note"),
+            )
+
+    monkeypatch.setattr(llm_core, "_get_http_client", lambda: _FakeAsyncClient())
+    request_messages = [{"role": "user", "content": "review-template-kwargs"}]
+    request_options = {
+        "chat_template_kwargs": {"enable_thinking": False}
+    }
+    request_key = llm_core._get_cache_key(
+        "http://template.test/v1",
+        "ornith-9b",
+        request_messages,
+        llm_core.LLMConfig.DEFAULT_TEMPERATURE,
+        llm_core.LLMConfig.DEFAULT_MAX_TOKENS,
+        request_options=request_options,
+    )
+    llm_core._response_cache.pop(request_key, None)
+
+    result = asyncio.run(llm_core.llm_call_async(
+        "http://template.test/v1",
+        "ornith-9b",
+        request_messages,
+        chat_template_kwargs={"enable_thinking": False},
+    ))
+
+    assert result == "direct note"
+    assert captured["chat_template_kwargs"] == {"enable_thinking": False}
+    base = llm_core._get_cache_key(
+        "u", "m", [{"role": "user", "content": "x"}], 0.1, 10
+    )
+    direct = llm_core._get_cache_key(
+        "u",
+        "m",
+        [{"role": "user", "content": "x"}],
+        0.1,
+        10,
+        request_options={"chat_template_kwargs": {"enable_thinking": False}},
+    )
+    assert base != direct
+
+
 # ---------------------------------------------------------------------------
 # 3. Normal content takes priority over reasoning_content when both present
 # ---------------------------------------------------------------------------

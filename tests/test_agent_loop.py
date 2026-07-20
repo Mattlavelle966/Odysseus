@@ -41,6 +41,7 @@ try:
         _append_tool_results,
         _insert_before_latest_user,
         _MCP_KEYWORDS,
+        _turn_requests_workspace_mutation,
     )
     _IMPORTED_AGENT_LOOP = sys.modules.get("src.agent_loop")
 finally:
@@ -83,6 +84,50 @@ def test_fix_app_request_classifies_as_file_development():
     assert intent["low_signal"] is False
     assert "files" in intent["domains"]
     assert "web" not in intent["domains"]
+
+
+def test_actionable_followup_inherits_recent_development_task():
+    messages = [
+        {
+            "role": "user",
+            "content": (
+                "Review the AgentIDE signup fetch, local preview routing, and "
+                "the missing diagnostics, then propose improvements."
+            ),
+        },
+        {"role": "assistant", "content": "Here are the improvements I found."},
+        {
+            "role": "user",
+            "content": (
+                "please implement all of those, and refresh what is running "
+                "on port 4100 when complete"
+            ),
+        },
+    ]
+
+    intent = _classify_agent_request(messages, messages[-1]["content"])
+
+    assert intent["continuation"] is True
+    assert intent["low_signal"] is False
+    assert "files" in intent["domains"]
+    assert "AgentIDE signup fetch" in intent["retrieval_query"]
+    assert _turn_requests_workspace_mutation(
+        intent,
+        messages[-1]["content"],
+        workspace="/workspace/app",
+    )
+
+
+def test_unrelated_anaphora_does_not_inherit_stale_non_work_chat():
+    messages = [
+        {"role": "user", "content": "My favorite color is green."},
+        {"role": "assistant", "content": "Noted."},
+        {"role": "user", "content": "do all of that"},
+    ]
+
+    intent = _classify_agent_request(messages, messages[-1]["content"])
+
+    assert intent["continuation"] is False
 
 
 def test_insert_before_latest_user_places_context_before_last_user_turn():

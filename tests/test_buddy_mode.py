@@ -48,22 +48,28 @@ def test_buddy_subagent_uses_clean_tool_free_context(monkeypatch):
             model="test-model",
             headers={"Authorization": "secret"},
             guide_prompt="Be a skeptical staff engineer.",
+            role="worker",
+            available_tools="read_file, edit_file, bash",
         )
     )
 
     assert result == "Lead with the failing test, then fix the parser."
     assert captured["model"] == "test-model"
-    assert captured["temperature"] == 0.2
+    assert captured["temperature"] == 0.1
+    assert captured["max_tokens"] == 1200
+    assert captured["chat_template_kwargs"] == {"enable_thinking": False}
     assert len(captured["messages"]) == 2
     assert [message["role"] for message in captured["messages"]] == [
         "system",
         "user",
     ]
     assert "skeptical staff engineer" in captured["messages"][0]["content"]
+    assert "bounded implementation worker" in captured["messages"][0]["content"]
     snapshot = captured["messages"][1]["content"]
     assert "Fix the parser" in snapshot
     assert "one failure" in snapshot
     assert "I think this is done." in snapshot
+    assert "read_file, edit_file, bash" in snapshot
     assert "tools" not in captured
 
 
@@ -109,11 +115,19 @@ def test_buddy_reviews_final_path_and_returns_control_to_primary(monkeypatch):
             relevant_tools={"bash"},
             buddy_enabled=True,
             buddy_prompt="Challenge assumptions.",
+            buddy_endpoint_url="http://buddy.test/v1",
+            buddy_model="ornith-9b",
+            buddy_headers={"Authorization": "buddy-secret"},
+            buddy_role="reviewer",
         )
     )
     events = _events(chunks)
 
     assert len(buddy_calls) == 1
+    assert buddy_calls[0][1]["endpoint_url"] == "http://buddy.test/v1"
+    assert buddy_calls[0][1]["model"] == "ornith-9b"
+    assert buddy_calls[0][1]["headers"] == {"Authorization": "buddy-secret"}
+    assert buddy_calls[0][1]["role"] == "reviewer"
     assert len(primary_calls) == 2
     assert any(
         event.get("type") == "buddy_start" and event.get("reason") == "final"
@@ -140,10 +154,20 @@ def test_buddy_ui_and_request_are_wired():
 
     assert 'id="buddy-toggle-btn"' in html
     assert 'id="buddy-guide-prompt"' in html
+    assert 'id="buddy-endpoint"' in html
+    assert 'id="buddy-model"' in html
+    assert 'id="buddy-role"' in html
+    assert 'id="buddy-cadence"' in html
+    assert 'id="buddy-final-review"' in html
     assert 'id="buddy-modal"' in html
     assert "stateKey: 'buddy'" in app_js
     assert "Buddy is deliberately opt-in" in app_js
     assert "fd.append('buddy_enabled', 'true')" in chat_js
     assert "fd.append('buddy_prompt'" in chat_js
+    assert "fd.append('buddy_endpoint_id'" in chat_js
+    assert "fd.append('buddy_model'" in chat_js
+    assert "fd.append('buddy_role'" in chat_js
     assert "buddy_enabled=buddy_enabled" in route
     assert "buddy_prompt=buddy_prompt" in route
+    assert "resolve_endpoint_by_id" in route
+    assert "buddy_endpoint_url=_buddy_endpoint_url" in route

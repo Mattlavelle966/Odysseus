@@ -10,7 +10,7 @@ import modelsModule from './js/models.js';
 import ragModule from './js/rag.js';
 import presetsModule from './js/presets.js';
 import searchModule from './js/search.js';
-import chatModule from './js/chat.js?v=20260719buddy';
+import chatModule from './js/chat.js?v=20260720buddy2';
 import compareModule from './js/compare/index.js';
 import documentModule from './js/document.js';
 import searchChatModule from './js/search-chat.js';
@@ -1845,7 +1845,7 @@ function initializeEventListeners() {
   const _toolSplashes = {
     web: { role: 'Web Search', text: 'Searches the web for relevant information to include in the response. Results are fetched and summarized before the AI answers.' },
     bash: { role: 'Shell Access', text: 'Gives the AI access to a sandboxed shell for running commands, installing packages, and executing scripts. Use with caution.' },
-    buddy: { role: 'Buddy Mode', text: 'A fresh-context agent periodically reviews the path and coaches the primary agent before it commits to a final answer.' },
+    buddy: { role: 'Buddy Mode', text: 'A fresh agent on its own model coaches, reviews, researches, or drafts implementation work at checkpoints, stalls, and the final path.' },
     builder: { role: 'Tool Builder', text: 'Create custom mini-apps and tools the AI can use. Describe what you need and the AI will build a tool you can reuse across conversations.' },
     research: { role: 'Deep Research', text: 'Multi-round web search with source analysis. Takes longer but produces comprehensive, well-sourced answers. Your next message will trigger a deep research cycle.' },
   };
@@ -1903,19 +1903,24 @@ function initializeEventListeners() {
   setupToggle('web-toggle-btn', 'web-toggle', 'web');
   setupToggle('bash-toggle-btn', 'bash-toggle', 'bash');
 
-  // Buddy uses the same per-mode persistence as Search/Shell, but its first
-  // activation opens a compact guide-prompt editor.
+  // Buddy uses the same per-mode enablement as Search/Shell and exposes its
+  // role, cadence, endpoint, model, and private guide in one toolbar menu.
   (function initBuddyToggle() {
     const btn = el('buddy-toggle-btn');
     const chk = el('buddy-toggle');
     const modal = el('buddy-modal');
     const prompt = el('buddy-guide-prompt');
+    const enabledSetting = el('buddy-enabled-setting');
+    const roleSelect = el('buddy-role');
+    const cadenceSelect = el('buddy-cadence');
+    const endpointSelect = el('buddy-endpoint');
+    const modelSelect = el('buddy-model');
+    const finalReview = el('buddy-final-review');
     const saveBtn = el('save-buddy-modal');
     const cancelBtn = el('cancel-buddy-modal');
     const closeBtn = el('close-buddy-modal');
-    if (!btn || !chk || !modal || !prompt) return;
-
-    let enabledBeforeOpen = false;
+    if (!btn || !chk || !modal || !prompt || !enabledSetting) return;
+    let buddyEndpoints = [];
 
     function setBuddyEnabled(active) {
       const mode = (loadToggleState().mode) || 'chat';
@@ -1923,18 +1928,75 @@ function initializeEventListeners() {
       btn.classList.toggle('active', !!active);
       btn.setAttribute('aria-pressed', String(!!active));
       btn.title = active
-        ? 'Buddy Mode active — click to disable (turn on again to edit its prompt)'
-        : 'Buddy Mode';
+        ? 'Buddy Mode active — click for settings'
+        : 'Buddy Mode — click for settings';
       saveToolPref('buddy', mode, !!active);
       showToolToggleToast('buddy', !!active);
       document.dispatchEvent(new CustomEvent('overflow-state-change'));
     }
 
-    function openBuddyModal() {
+    function fillBuddyModels(endpointId, selectedModel) {
+      if (!modelSelect) return;
+      const endpoint = buddyEndpoints.find(ep => String(ep.id) === String(endpointId));
+      const models = endpoint && Array.isArray(endpoint.models) ? endpoint.models : [];
+      modelSelect.innerHTML = '<option value="">Endpoint default</option>';
+      models.forEach(model => {
+        const option = document.createElement('option');
+        option.value = String(model);
+        option.textContent = String(model);
+        modelSelect.appendChild(option);
+      });
+      modelSelect.value = models.includes(selectedModel) ? selectedModel : '';
+    }
+
+    async function loadBuddyEndpoints(state) {
+      if (!endpointSelect) return;
+      endpointSelect.innerHTML = '<option value="">Primary model</option>';
+      try {
+        const response = await fetch('/api/model-endpoints', { credentials: 'same-origin' });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const rows = await response.json();
+        buddyEndpoints = (Array.isArray(rows) ? rows : []).filter(
+          ep => ep && ep.is_enabled !== false && (ep.model_type || 'llm') === 'llm'
+        );
+        buddyEndpoints.forEach(ep => {
+          const option = document.createElement('option');
+          option.value = String(ep.id);
+          option.textContent = `${ep.name || ep.base_url || 'Endpoint'}${ep.models && ep.models.length ? ` · ${ep.models.length} model${ep.models.length === 1 ? '' : 's'}` : ''}`;
+          endpointSelect.appendChild(option);
+        });
+        let endpointId = String(state.buddy_endpoint_id || '');
+        if (!endpointId) {
+          const nineB = buddyEndpoints.find(
+            ep => Array.isArray(ep.models) && ep.models.some(model => /ornith.*9b|9b.*ornith/i.test(String(model)))
+          );
+          if (nineB) {
+            endpointId = String(nineB.id);
+            state.buddy_endpoint_id = endpointId;
+            state.buddy_model = String(
+              nineB.models.find(model => /ornith.*9b|9b.*ornith/i.test(String(model))) || ''
+            );
+          }
+        }
+        endpointSelect.value = buddyEndpoints.some(ep => String(ep.id) === endpointId) ? endpointId : '';
+        fillBuddyModels(endpointSelect.value, String(state.buddy_model || ''));
+      } catch (error) {
+        buddyEndpoints = [];
+        fillBuddyModels('', '');
+        console.debug('[buddy] endpoint menu using primary model:', error);
+      }
+    }
+
+    async function openBuddyModal() {
       const state = loadToggleState();
       prompt.value = state.buddy_prompt || '';
+      enabledSetting.checked = chk.checked || !state.buddy_configured;
+      if (roleSelect) roleSelect.value = state.buddy_role || 'adaptive';
+      if (cadenceSelect) cadenceSelect.value = state.buddy_cadence || 'balanced';
+      if (finalReview) finalReview.checked = state.buddy_final_review !== false;
+      await loadBuddyEndpoints(state);
       modal.classList.remove('hidden');
-      setTimeout(() => prompt.focus(), 0);
+      setTimeout(() => roleSelect && roleSelect.focus(), 0);
     }
 
     const mode = (loadToggleState().mode) || 'chat';
@@ -1942,32 +2004,39 @@ function initializeEventListeners() {
     chk.checked = active;
     btn.classList.toggle('active', active);
     btn.setAttribute('aria-pressed', String(active));
-    if (active) btn.title = 'Buddy Mode active — click to disable (turn on again to edit its prompt)';
+    btn.title = active
+      ? 'Buddy Mode active — click for settings'
+      : 'Buddy Mode — click for settings';
 
     btn.addEventListener('click', () => {
-      if (chk.checked) {
-        setBuddyEnabled(false);
-        return;
-      }
-      enabledBeforeOpen = false;
-      setBuddyEnabled(true);
-      _showToolSplash('buddy');
       openBuddyModal();
     });
+    if (endpointSelect) {
+      endpointSelect.addEventListener('change', () => {
+        fillBuddyModels(endpointSelect.value, '');
+      });
+    }
 
     if (saveBtn) {
       saveBtn.addEventListener('click', () => {
         const state = loadToggleState();
         state.buddy_prompt = prompt.value.trim().slice(0, 4000);
+        state.buddy_endpoint_id = endpointSelect ? endpointSelect.value : '';
+        state.buddy_model = modelSelect ? modelSelect.value : '';
+        state.buddy_role = roleSelect ? roleSelect.value : 'adaptive';
+        state.buddy_cadence = cadenceSelect ? cadenceSelect.value : 'balanced';
+        state.buddy_final_review = finalReview ? !!finalReview.checked : true;
+        state.buddy_configured = true;
         saveToggleState(state);
-        if (!chk.checked) setBuddyEnabled(true);
+        const wasEnabled = chk.checked;
+        setBuddyEnabled(enabledSetting.checked);
+        if (!wasEnabled && enabledSetting.checked) _showToolSplash('buddy');
         modal.classList.add('hidden');
       });
     }
 
     function cancelBuddyEdit() {
       modal.classList.add('hidden');
-      if (!enabledBeforeOpen) setBuddyEnabled(false);
     }
     if (cancelBtn) cancelBtn.addEventListener('click', cancelBuddyEdit);
     if (closeBtn) closeBtn.addEventListener('click', cancelBuddyEdit);

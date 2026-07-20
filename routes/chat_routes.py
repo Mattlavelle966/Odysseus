@@ -20,7 +20,11 @@ from src.agent_loop import stream_agent_loop
 from src import agent_runs
 from src.model_context import estimate_tokens
 from src.chat_helpers import coerce_message_and_session
-from src.endpoint_resolver import normalize_base as _normalize_base, build_chat_url
+from src.endpoint_resolver import (
+    normalize_base as _normalize_base,
+    build_chat_url,
+    resolve_endpoint_by_id,
+)
 from src.session_search import search_session_messages
 from src.prompt_security import untrusted_context_message
 from core.exceptions import SessionNotFoundError
@@ -598,6 +602,34 @@ def setup_chat_routes(
         if buddy_prompt_raw is None:
             buddy_prompt_raw = (body or {}).get("buddy_prompt", "")
         buddy_prompt = str(buddy_prompt_raw or "")[:4000]
+        buddy_endpoint_id = form_data.get("buddy_endpoint_id")
+        if buddy_endpoint_id is None:
+            buddy_endpoint_id = (body or {}).get("buddy_endpoint_id", "")
+        buddy_model_requested = form_data.get("buddy_model")
+        if buddy_model_requested is None:
+            buddy_model_requested = (body or {}).get("buddy_model", "")
+        buddy_role = str(
+            form_data.get("buddy_role")
+            or (body or {}).get("buddy_role")
+            or "adaptive"
+        ).lower()
+        if buddy_role not in {"adaptive", "coach", "worker", "researcher", "reviewer"}:
+            buddy_role = "adaptive"
+        buddy_cadence = str(
+            form_data.get("buddy_cadence")
+            or (body or {}).get("buddy_cadence")
+            or "balanced"
+        ).lower()
+        if buddy_cadence not in {"frequent", "balanced", "sparse", "final"}:
+            buddy_cadence = "balanced"
+        buddy_final_raw = form_data.get("buddy_final_review")
+        if buddy_final_raw is None:
+            buddy_final_raw = (body or {}).get("buddy_final_review")
+        buddy_final_review = (
+            True
+            if buddy_final_raw is None
+            else str(buddy_final_raw).lower() == "true"
+        )
         use_rag = form_data.get("use_rag")
         search_context = form_data.get("search_context")  # pre-fetched web search results (compare mode)
         compare_mode = str(form_data.get("compare_mode", "")).lower() == "true"
@@ -968,6 +1000,22 @@ def setup_chat_routes(
         # Enforce per-user privileges
         _privs = {}
         _user = ctx.user
+        _buddy_endpoint_url = None
+        _buddy_model = None
+        _buddy_headers = None
+        if buddy_enabled and str(buddy_endpoint_id or "").strip():
+            _buddy_resolved = resolve_endpoint_by_id(
+                str(buddy_endpoint_id).strip(),
+                model=str(buddy_model_requested or "").strip() or None,
+                owner=_user,
+            )
+            if _buddy_resolved:
+                _buddy_endpoint_url, _buddy_model, _buddy_headers = _buddy_resolved
+            else:
+                logger.warning(
+                    "[buddy] configured endpoint %r could not be resolved; using primary model",
+                    buddy_endpoint_id,
+                )
         if _user and hasattr(request.app.state, 'auth_manager') and request.app.state.auth_manager:
             _privs = request.app.state.auth_manager.get_privileges(_user)
         if _privs:
@@ -1443,7 +1491,7 @@ def setup_chat_routes(
                     _max_rounds = max(1, min(_max_rounds, 1000))
 
                     _forced_tools = None
-                    if _search_enabled:
+                    if _search_enabled and _explicit_web_intent:
                         _forced_tools = set(WEB_TOOL_NAMES)
 
                     async for chunk in stream_agent_loop(
@@ -1471,6 +1519,12 @@ def setup_chat_routes(
                         uploaded_files=ctx.uploaded_files,
                         buddy_enabled=buddy_enabled,
                         buddy_prompt=buddy_prompt,
+                        buddy_endpoint_url=_buddy_endpoint_url,
+                        buddy_model=_buddy_model,
+                        buddy_headers=_buddy_headers,
+                        buddy_role=buddy_role,
+                        buddy_cadence=buddy_cadence,
+                        buddy_final_review=buddy_final_review,
                     ):
                         if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
                             try:
@@ -1494,9 +1548,11 @@ def setup_chat_routes(
                                     "doc_update", "doc_suggestions", "ui_control",
                                     "rounds_exhausted", "budget_exceeded",
                                     "loop_breaker_triggered",
+                                    "progress_nudge",
                                     "intent_nudge_exhausted",
                                     "ask_user",
                                     "plan_update",
+                                    "buddy_start", "buddy_result",
                                 ):
                                     if data.get("type") == "agent_step":
                                         _agent_rounds = max(_agent_rounds, data.get("round", 1))

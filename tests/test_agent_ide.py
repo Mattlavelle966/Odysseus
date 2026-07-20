@@ -407,6 +407,7 @@ def test_agent_tool_opens_panel_only_after_persisted_connection(monkeypatch):
         ("Build this React site and preview it on port 5173", None),
         ("Open AgentIDE for this project", None),
         ("Continue developing the frontend", "/workspace/site"),
+        ("Refresh what is running on port 4100 when complete", "/workspace/site"),
     ],
 )
 def test_real_site_projects_route_to_agent_ide(message, workspace):

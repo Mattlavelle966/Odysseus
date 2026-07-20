@@ -16,9 +16,9 @@ from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
-_LOCAL_MODEL_LOCK = asyncio.Lock()
-_LOCAL_MODEL_WAITING_FOREGROUND = 0
-_LOCAL_MODEL_CURRENT: Dict[str, object] = {}
+_LOCAL_MODEL_LOCKS: Dict[str, asyncio.Lock] = {}
+_LOCAL_MODEL_WAITING_FOREGROUND: Dict[str, int] = {}
+_LOCAL_MODEL_CURRENT: Dict[str, Dict[str, object]] = {}
 
 
 def _local_model_gate_enabled() -> bool:
@@ -29,25 +29,38 @@ def _gate_workload(workload: Optional[str]) -> str:
     return "background" if str(workload or "").lower() == "background" else "foreground"
 
 
+def _local_model_gate_key(target_url: str) -> str:
+    """One generation lane per local server authority, not per application."""
+    parsed = urlparse(str(target_url or ""))
+    return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
+
+
 @asynccontextmanager
 async def _local_model_slot(target_url: str, model: str, workload: Optional[str] = None):
-    """Serialize local model traffic, with foreground chat taking priority.
+    """Serialize traffic per local server, with foreground calls taking priority.
 
     Most local servers expose one GPU/CPU generation pipe even when their HTTP
     API accepts multiple requests. Letting scheduled email/tasks and foreground
     chat hit that pipe together creates the user-visible "streams crossed" and
-    "prompt waited behind a task" failure mode. Cloud providers are left alone.
+    "prompt waited behind a task" failure mode. Different authorities (for
+    example ports 8080 and 8083 on separate GPUs) have independent locks and
+    can run concurrently. Cloud providers are left alone.
     """
     if not _local_model_gate_enabled() or not is_local_endpoint(target_url):
         yield
         return
 
-    global _LOCAL_MODEL_WAITING_FOREGROUND
+    gate_key = _local_model_gate_key(target_url)
+    lock = _LOCAL_MODEL_LOCKS.setdefault(gate_key, asyncio.Lock())
     kind = _gate_workload(workload)
     current_task = asyncio.current_task()
+    waiting_registered = False
     if kind == "foreground":
-        _LOCAL_MODEL_WAITING_FOREGROUND += 1
-        current = dict(_LOCAL_MODEL_CURRENT)
+        _LOCAL_MODEL_WAITING_FOREGROUND[gate_key] = (
+            _LOCAL_MODEL_WAITING_FOREGROUND.get(gate_key, 0) + 1
+        )
+        waiting_registered = True
+        current = dict(_LOCAL_MODEL_CURRENT.get(gate_key) or {})
         if current.get("workload") == "background":
             task = current.get("task")
             if isinstance(task, asyncio.Task) and not task.done():
@@ -57,38 +70,38 @@ async def _local_model_slot(target_url: str, model: str, workload: Optional[str]
                 )
                 task.cancel()
     else:
-        # Background work should not jump in while the browser/chat is active
-        # or while a foreground request is waiting to acquire the local model.
-        try:
-            from src.interactive_gate import has_foreground_activity
-        except Exception:
-            has_foreground_activity = lambda: False  # type: ignore
-        while _LOCAL_MODEL_WAITING_FOREGROUND > 0 or has_foreground_activity():
+        # Background work should not jump ahead of a foreground request queued
+        # for this same server. Activity on a different GPU/server is unrelated.
+        while _LOCAL_MODEL_WAITING_FOREGROUND.get(gate_key, 0) > 0:
             await asyncio.sleep(0.25)
 
     acquired = False
     try:
-        await _LOCAL_MODEL_LOCK.acquire()
+        await lock.acquire()
         acquired = True
         if kind == "foreground":
-            _LOCAL_MODEL_WAITING_FOREGROUND = max(0, _LOCAL_MODEL_WAITING_FOREGROUND - 1)
-        _LOCAL_MODEL_CURRENT.clear()
-        _LOCAL_MODEL_CURRENT.update({
+            _LOCAL_MODEL_WAITING_FOREGROUND[gate_key] = max(
+                0, _LOCAL_MODEL_WAITING_FOREGROUND.get(gate_key, 0) - 1
+            )
+            waiting_registered = False
+        _LOCAL_MODEL_CURRENT[gate_key] = {
             "task": current_task,
             "workload": kind,
             "url": target_url,
             "model": model,
             "started": time.time(),
-        })
+        }
         yield
     finally:
-        if kind == "foreground":
-            _LOCAL_MODEL_WAITING_FOREGROUND = max(0, _LOCAL_MODEL_WAITING_FOREGROUND - 1)
-        if acquired and _LOCAL_MODEL_LOCK.locked():
-            owner = _LOCAL_MODEL_CURRENT.get("task")
+        if waiting_registered:
+            _LOCAL_MODEL_WAITING_FOREGROUND[gate_key] = max(
+                0, _LOCAL_MODEL_WAITING_FOREGROUND.get(gate_key, 0) - 1
+            )
+        if acquired and lock.locked():
+            owner = (_LOCAL_MODEL_CURRENT.get(gate_key) or {}).get("task")
             if owner is current_task:
-                _LOCAL_MODEL_CURRENT.clear()
-            _LOCAL_MODEL_LOCK.release()
+                _LOCAL_MODEL_CURRENT.pop(gate_key, None)
+            lock.release()
 
 class LLMConfig:
     """Configuration constants for LLM operations."""
@@ -120,7 +133,8 @@ def _stream_timeout(read_timeout) -> httpx.Timeout:
 
 # Cache for LLM responses
 def _get_cache_key(url: str, model: str, messages: List[Dict], 
-                   temperature: float, max_tokens: int) -> str:
+                   temperature: float, max_tokens: int,
+                   request_options: Optional[Dict] = None) -> str:
     """Generate cache key for LLM requests."""
     hashable_messages = []
     for msg in messages:
@@ -132,7 +146,8 @@ def _get_cache_key(url: str, model: str, messages: List[Dict],
         'model': model, 
         'messages': hashable_messages,
         'temp': temperature,
-        'max_tokens': max_tokens
+        'max_tokens': max_tokens,
+        'request_options': request_options or {},
     }, sort_keys=True)
     return hashlib.sha256(content.encode()).hexdigest()
 
@@ -1939,6 +1954,7 @@ async def llm_call_async(
     prompt_type: Optional[str] = None,
     session_id: Optional[str] = None,
     workload: str = "foreground",
+    chat_template_kwargs: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Asynchronous LLM call using httpx with connection pooling, timeout, retry logic, and performance logging."""
     provider = _detect_provider(url)
@@ -1957,7 +1973,16 @@ async def llm_call_async(
     else:
         messages_copy = non_sys
 
-    cache_key = _get_cache_key(url, model, messages_copy, temperature, max_tokens)
+    cache_key = _get_cache_key(
+        url,
+        model,
+        messages_copy,
+        temperature,
+        max_tokens,
+        request_options={"chat_template_kwargs": chat_template_kwargs}
+        if chat_template_kwargs
+        else None,
+    )
     cached_response = _get_cached_response(cache_key)
     if cached_response:
         logger.debug(f"Returning cached response for key: {cache_key}")
@@ -2036,6 +2061,16 @@ async def llm_call_async(
         if max_tokens and max_tokens > 0:
             tok_key = "max_completion_tokens" if _uses_max_completion_tokens(model) else "max_tokens"
             payload[tok_key] = max_tokens
+        if (
+            isinstance(chat_template_kwargs, dict)
+            and chat_template_kwargs
+            and is_local_endpoint(target_url)
+        ):
+            # OpenAI-compatible local servers such as llama.cpp expose model
+            # template switches here. Buddy uses enable_thinking=false so a
+            # small reasoning model returns its concise coaching note instead
+            # of exhausting the whole completion in hidden analysis.
+            payload["chat_template_kwargs"] = dict(chat_template_kwargs)
         # Suppress thinking for qwen3/gemma4 on Ollama /v1 — same as stream_llm.
         if _is_ollama_openai_compat_url(url) and _supports_thinking(model):
             payload["think"] = False

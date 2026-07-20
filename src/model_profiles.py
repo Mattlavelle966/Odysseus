@@ -116,7 +116,36 @@ class OrnithProfile(ModelProfile):
                 item = self._document_schema(name, item, active_document)
             selected.append(item)
         # Ornith is more reliable with a small, exact tool set. The caller's
-        # intent/RAG allowlist determines order; cap only this profile.
+        # intent/RAG allowlist determines membership. Put the task's execution
+        # tools ahead of incidental globally-registered schemas before capping:
+        # registration order previously let search/read helpers crowd out
+        # edit_file, write_file, or AgentIDE on an implementation turn.
+        names = {
+            str((item.get("function") or {}).get("name") or "")
+            for item in selected
+        }
+        if "agent_ide" in names:
+            priority = (
+                "agent_ide", "bash", "read_file", "edit_file", "write_file",
+                "grep", "glob", "ls",
+            )
+        elif names & _DOC_TOOLS:
+            priority = (
+                "create_document", "update_document", "edit_document",
+                "read_file", "bash", "edit_file", "write_file", "ask_user",
+            )
+        else:
+            priority = (
+                "bash", "read_file", "edit_file", "write_file", "grep",
+                "glob", "ls", "python", "web_search", "web_fetch",
+            )
+        rank = {name: index for index, name in enumerate(priority)}
+        selected.sort(
+            key=lambda item: rank.get(
+                str((item.get("function") or {}).get("name") or ""),
+                len(rank),
+            )
+        )
         return selected[:8]
 
     @staticmethod
